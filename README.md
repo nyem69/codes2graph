@@ -46,6 +46,16 @@ codes2graph watch /path/to/repo
 | `--index-source` | false | Store full source code in graph nodes |
 | `--skip-external` | false | Skip unresolved external function calls |
 
+## Relationship to CGC
+
+codes2graph **does not replace** `cgc mcp start` — it only replaces the broken `cgc watch` command. The workflow:
+
+1. **`cgc index --force .`** — one-time full index of a repo (already done for your repos)
+2. **`codes2graph watch /path/to/repo`** — keeps that repo's graph fresh as you edit
+3. **`cgc mcp start`** — unchanged, reads from Neo4j as before
+
+You only need to run `codes2graph watch` on the repo you're actively editing. If you're working on multiple repos simultaneously, run one watcher per repo. CGC MCP reads from the same shared Neo4j database regardless.
+
 ## How It Works
 
 On file change:
