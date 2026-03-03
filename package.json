@@ -1,0 +1,31 @@
+{
+  "name": "codes2graph",
+  "version": "0.1.0",
+  "description": "Incremental file watcher for CGC-compatible Neo4j code graphs",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "codes2graph": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "dotenv": "^16.4.7",
+    "neo4j-driver": "^5.27.0",
+    "picomatch": "^4.0.2",
+    "web-tree-sitter": "^0.24.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "@types/picomatch": "^3.0.1",
+    "tree-sitter-wasms": "^0.1.13",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7"
+  }
+}
