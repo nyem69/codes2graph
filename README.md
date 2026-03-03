@@ -32,18 +32,23 @@ The WASM setup copies tree-sitter language grammars from `node_modules` to the p
 ## Usage
 
 ```bash
-# Development
+# Watch for changes
 npx tsx src/index.ts watch /path/to/repo
 
 # With options
 npx tsx src/index.ts watch /path/to/repo --debounce 3000 --max-wait 20000 --index-source --skip-external
 
+# Clean ignored files from graph (after cgc index which doesn't respect .cgcignore)
+npx tsx src/index.ts clean /path/to/repo --dry-run   # preview
+npx tsx src/index.ts clean /path/to/repo              # delete
+
 # Production (after build)
 npm run build
 codes2graph watch /path/to/repo
+codes2graph clean /path/to/repo
 ```
 
-### Options
+### Watch Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -51,6 +56,12 @@ codes2graph watch /path/to/repo
 | `--max-wait <ms>` | 30000 | Max wait before forced processing |
 | `--index-source` | false | Store full source code in graph nodes |
 | `--skip-external` | false | Skip unresolved external function calls |
+
+### Clean Options
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Show what would be deleted without deleting |
 
 ## Relationship to CGC
 
@@ -61,6 +72,28 @@ codes2graph **does not replace** `cgc mcp start` — it only replaces the broken
 3. **`cgc mcp start`** — unchanged, reads from Neo4j as before
 
 You only need to run `codes2graph watch` on the repo you're actively editing. If you're working on multiple repos simultaneously, run one watcher per repo. CGC MCP reads from the same shared Neo4j database regardless.
+
+## Cleaning Ignored Files
+
+`cgc index --force` does **not** respect `.cgcignore` — it indexes everything, including directories like `.wrangler/`, `node_modules/`, `.svelte-kit/`, etc. This pollutes the graph with thousands of irrelevant nodes that show up in `cgc analyze dead-code` and other queries.
+
+Run `clean` after any full reindex to remove them:
+
+```bash
+# Preview what would be deleted
+codes2graph clean /path/to/repo --dry-run
+
+# Delete ignored files from the graph
+codes2graph clean /path/to/repo
+```
+
+This reads your `.cgcignore` (plus built-in defaults), finds all matching File nodes in Neo4j, and deletes them along with their contained Functions, Classes, Variables, etc.
+
+**Recommended workflow after reindexing:**
+```bash
+cgc index --force .                    # full reindex (doesn't respect .cgcignore)
+codes2graph clean /path/to/repo        # remove ignored files from graph
+```
 
 ## How It Works
 
