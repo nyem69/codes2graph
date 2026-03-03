@@ -1,5 +1,11 @@
 # codes2graph
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Neo4j](https://img.shields.io/badge/Neo4j-5.x-4581C3?logo=neo4j&logoColor=white)](https://neo4j.com)
+[![Vitest](https://img.shields.io/badge/Tested_with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev)
+
 Incremental file watcher that keeps a [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) (CGC)-compatible Neo4j graph up-to-date as you edit code. Replaces CGC's broken `cgc watch` (O(n²-n³) per save) with per-file incremental updates targeting <2s per change.
 
 Writes to the **same Neo4j database and schema** that CGC uses — all existing CGC MCP tools (`find_code`, `find_callers`, `find_dead_code`, etc.) continue working unchanged.
@@ -111,4 +117,4 @@ SKIP_EXTERNAL_RESOLUTION=false
 
 ## License
 
-Private
+[MIT](LICENSE)
