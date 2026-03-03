@@ -105,6 +105,29 @@ npm run test:watch    # watch mode
 
 Integration tests require a running Neo4j instance and will gracefully skip if unavailable.
 
+## Viewing the Graph
+
+Open the Neo4j Browser at [http://localhost:7474](http://localhost:7474) (already running with your Neo4j instance). Example queries:
+
+```cypher
+-- All nodes for a file
+MATCH (f:File {relative_path: "src/lib/server/db.ts"})-[:CONTAINS]->(n) RETURN f, n
+
+-- Call graph
+MATCH (a)-[r:CALLS]->(b) RETURN a, r, b LIMIT 100
+
+-- Inheritance tree
+MATCH (a)-[r:INHERITS]->(b) RETURN a, r, b
+```
+
+Other viewers:
+
+| Tool | Description |
+|------|-------------|
+| [Neo4j Desktop](https://neo4j.com/download/) | Free desktop app with browser + plugins |
+| [Neo4j Bloom](https://neo4j.com/product/bloom/) | Interactive graph exploration (included in Neo4j Desktop) |
+| [Neodash](https://neodash.graphapp.io) | Open-source dashboard builder for Neo4j |
+
 ## Environment Variables
 
 ```
