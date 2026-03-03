@@ -92,25 +92,34 @@ export class Watcher {
       { quietMs: this.options.debounceQuiet, maxMs: this.options.debounceMax },
     );
 
+    // Use chokidar with polling to avoid EMFILE under launchd's 256 fd limit.
+    // Polling uses fs.stat() instead of fs.watch(), needing zero persistent fds.
     this.fsWatcher = chokidar.watch(absRepoPath, {
-      ignored: (filePath: string, stats) => {
+      ignored: (filePath: string) => {
         const rel = relative(absRepoPath, filePath);
         if (!rel) return false;
         if (isIgnored(rel, ignorePatterns)) return true;
-        if (stats?.isFile() && !SUPPORTED_EXTENSIONS.has(extname(filePath))) return true;
         return false;
       },
+      usePolling: true,
+      interval: 2000,
+      binaryInterval: 5000,
       persistent: true,
       ignoreInitial: true,
-      awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
     });
 
     this.fsWatcher
-      .on('add', (p) => this.debouncer!.add(resolve(p)))
-      .on('change', (p) => this.debouncer!.add(resolve(p)))
-      .on('unlink', (p) => this.debouncer!.add(resolve(p)))
-      .on('ready', () => console.log(`Watching ${absRepoPath} for changes...`))
+      .on('add', (p) => this.onFileEvent(absRepoPath, p, ignorePatterns))
+      .on('change', (p) => this.onFileEvent(absRepoPath, p, ignorePatterns))
+      .on('unlink', (p) => this.onFileEvent(absRepoPath, p, ignorePatterns))
+      .on('ready', () => console.log(`Watching ${absRepoPath} for changes (polling mode)...`))
       .on('error', (err) => console.error('Watcher error:', err));
+  }
+
+  private onFileEvent(repoPath: string, filePath: string, _ignorePatterns: string[]): void {
+    const absPath = resolve(filePath);
+    if (!SUPPORTED_EXTENSIONS.has(extname(absPath))) return;
+    this.debouncer!.add(absPath);
   }
 
   async stop(): Promise<void> {

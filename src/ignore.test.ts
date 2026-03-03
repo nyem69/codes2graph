@@ -24,4 +24,12 @@ describe('ignore patterns', () => {
     expect(isIgnored('vendor/lib.min.js', patterns)).toBe(true);
     expect(isIgnored('src/lib.js', patterns)).toBe(false);
   });
+
+  it('matches bare directory names (for chokidar early skip)', () => {
+    const patterns = loadIgnorePatterns('/nonexistent/path');
+    expect(isIgnored('node_modules', patterns)).toBe(true);
+    expect(isIgnored('.svelte-kit', patterns)).toBe(true);
+    expect(isIgnored('.git', patterns)).toBe(true);
+    expect(isIgnored('src', patterns)).toBe(false);
+  });
 });

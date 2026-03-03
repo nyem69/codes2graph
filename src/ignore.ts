@@ -3,12 +3,20 @@ import { resolve, dirname } from 'path';
 import picomatch from 'picomatch';
 
 const DEFAULT_PATTERNS = [
+  'node_modules',
   'node_modules/**',
+  '.svelte-kit',
   '.svelte-kit/**',
+  'coverage',
   'coverage/**',
+  'dist',
   'dist/**',
+  'build',
   'build/**',
+  '.git',
   '.git/**',
+  '.claude',
+  '.claude/**',
   '**/*.min.js',
   '**/*.map',
 ];
@@ -21,8 +29,20 @@ export function loadIgnorePatterns(startPath: string): string[] {
       const lines = readFileSync(candidate, 'utf-8')
         .split('\n')
         .map(l => l.trim())
-        .filter(l => l && !l.startsWith('#'));
-      return lines.map(p => p.endsWith('/') ? p + '**' : p);
+        .filter(l => l && !l.startsWith('#'))
+        .map(l => l.replace(/^\/+/, '')); // strip leading slashes (gitignore-style root anchors)
+      const expanded: string[] = [];
+      for (const p of lines) {
+        if (p.endsWith('/')) {
+          expanded.push(p.slice(0, -1));  // bare dir name
+          expanded.push(p + '**');         // contents
+        } else {
+          expanded.push(p);
+          // Also add bare dir for dir/** patterns
+          if (p.endsWith('/**')) expanded.push(p.slice(0, -3));
+        }
+      }
+      return expanded;
     }
     const parent = dirname(dir);
     if (parent === dir) break;
