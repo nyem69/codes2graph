@@ -14,39 +14,57 @@ Writes to the **same Neo4j database and schema** that CGC uses — all existing 
 Claude Code <--MCP--> cgc mcp start <--read--> Neo4j <--incremental write-- codes2graph
 ```
 
+## Quick Start
+
+```bash
+# 1. Install
+git clone <repo-url> && cd codes2graph
+npm install
+bash scripts/setup-wasm.sh
+
+# 2. Configure Neo4j credentials (pick one)
+cp .env.example .env              # edit with your Neo4j creds
+# — or use CGC's existing config at ~/.codegraphcontext/.env
+
+# 3. Run
+npx tsx src/index.ts watch /path/to/repo
+```
+
+That's it — the watcher is running. Edit a `.ts`/`.js` file in your repo and the graph updates within seconds.
+
 ## Prerequisites
 
 - Node.js >= 18
 - Neo4j (running, with CGC schema — run `cgc index --force .` once for initial setup)
 
-## Setup
+## Install as Global Command (optional)
 
 ```bash
-npm install
-bash scripts/setup-wasm.sh
-cp .env.example .env  # edit with your Neo4j credentials
+npm run build     # compile TypeScript → dist/
+npm link          # symlink "codes2graph" into your PATH
+
+# now works anywhere:
+codes2graph watch /path/to/repo
+codes2graph clean /path/to/repo
 ```
 
-The WASM setup copies tree-sitter language grammars from `node_modules` to the project root. Config can also live at `~/.codegraphcontext/.env` (CGC's config location).
+> **Why `codes2graph` doesn't work without this:** the `bin` field in package.json points to `dist/index.js`, which only exists after `npm run build`. Without building, use `npx tsx src/index.ts` instead.
 
 ## Usage
 
 ```bash
-# Watch for changes
+# Watch for changes (dev)
 npx tsx src/index.ts watch /path/to/repo
 
-# With options
+# Watch with options
 npx tsx src/index.ts watch /path/to/repo --debounce 3000 --max-wait 20000 --index-source --skip-external
 
-# Clean ignored files from graph (after cgc index which doesn't respect .cgcignore)
+# Clean ignored files from graph
 npx tsx src/index.ts clean /path/to/repo --dry-run   # preview
 npx tsx src/index.ts clean /path/to/repo              # delete
-
-# Production (after build)
-npm run build
-codes2graph watch /path/to/repo
-codes2graph clean /path/to/repo
 ```
+
+If you installed globally (`npm link`), replace `npx tsx src/index.ts` with `codes2graph`.
 
 ### Watch Options
 
