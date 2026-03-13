@@ -37,18 +37,15 @@ That's it — the watcher is running. Edit a `.ts`/`.js` file in your repo and t
 - Node.js >= 18
 - Neo4j (running, with CGC schema — run `cgc index --force .` once for initial setup)
 
-## Install as Global Command (optional)
+## Global Command (optional)
+
+To use `codes2graph` instead of `npx tsx src/index.ts`:
 
 ```bash
-npm run build     # compile TypeScript → dist/
-npm link          # symlink "codes2graph" into your PATH
-
-# now works anywhere:
-codes2graph watch /path/to/repo
-codes2graph clean /path/to/repo
+npm run build && npm link
 ```
 
-> **Why `codes2graph` doesn't work without this:** the `bin` field in package.json points to `dist/index.js`, which only exists after `npm run build`. Without building, use `npx tsx src/index.ts` instead.
+All examples below use `npx tsx src/index.ts`. If you ran the above, substitute `codes2graph`.
 
 ## Usage
 
@@ -86,10 +83,10 @@ If you installed globally (`npm link`), replace `npx tsx src/index.ts` with `cod
 codes2graph **does not replace** `cgc mcp start` — it only replaces the broken `cgc watch` command. The workflow:
 
 1. **`cgc index --force .`** — one-time full index of a repo (already done for your repos)
-2. **`codes2graph watch /path/to/repo`** — keeps that repo's graph fresh as you edit
+2. **`npx tsx src/index.ts watch /path/to/repo`** — keeps that repo's graph fresh as you edit
 3. **`cgc mcp start`** — unchanged, reads from Neo4j as before
 
-You only need to run `codes2graph watch` on the repo you're actively editing. If you're working on multiple repos simultaneously, run one watcher per repo. CGC MCP reads from the same shared Neo4j database regardless.
+You only need to run the watcher on the repo you're actively editing. If you're working on multiple repos simultaneously, run one watcher per repo. CGC MCP reads from the same shared Neo4j database regardless.
 
 ## Cleaning Ignored Files
 
@@ -99,18 +96,18 @@ Run `clean` after any full reindex to remove them:
 
 ```bash
 # Preview what would be deleted
-codes2graph clean /path/to/repo --dry-run
+npx tsx src/index.ts clean /path/to/repo --dry-run
 
 # Delete ignored files from the graph
-codes2graph clean /path/to/repo
+npx tsx src/index.ts clean /path/to/repo
 ```
 
 This reads your `.cgcignore` (plus built-in defaults), finds all matching File nodes in Neo4j, and deletes them along with their contained Functions, Classes, Variables, etc.
 
 **Recommended workflow after reindexing:**
 ```bash
-cgc index --force .                    # full reindex (doesn't respect .cgcignore)
-codes2graph clean /path/to/repo        # remove ignored files from graph
+cgc index --force .                                # full reindex (doesn't respect .cgcignore)
+npx tsx src/index.ts clean /path/to/repo           # remove ignored files from graph
 ```
 
 ## How It Works
