@@ -6,126 +6,302 @@
 [![Neo4j](https://img.shields.io/badge/Neo4j-5.x-4581C3?logo=neo4j&logoColor=white)](https://neo4j.com)
 [![Vitest](https://img.shields.io/badge/Tested_with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev)
 
-Incremental file watcher that keeps a [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) (CGC)-compatible Neo4j graph up-to-date as you edit code. Replaces CGC's broken `cgc watch` (O(n²-n³) per save) with per-file incremental updates targeting <2s per change.
+Watches your codebase and keeps a Neo4j graph of functions, classes, imports, and call relationships up-to-date as you edit. Changes are processed incrementally (<2s per file) instead of rebuilding the entire graph.
 
-Writes to the **same Neo4j database and schema** that CGC uses — all existing CGC MCP tools (`find_code`, `find_callers`, `find_dead_code`, etc.) continue working unchanged.
+The graph follows the [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) (CGC) schema, so CGC's MCP tools work out of the box. Any tool that reads Neo4j can also query the graph directly.
 
 ```
-Claude Code <--MCP--> cgc mcp start <--read--> Neo4j <--incremental write-- codes2graph
+Editor --> file save --> codes2graph --> Neo4j <-- any Neo4j reader
+                                              <-- cgc mcp start (CGC MCP tools)
+                                              <-- Neo4j Browser
+                                              <-- custom queries
 ```
 
-## Quick Start
+## What's in the Graph
 
-```bash
-# 1. Install
-git clone <repo-url> && cd codes2graph
-npm install
-bash scripts/setup-wasm.sh
+| Node type | Examples |
+|-----------|----------|
+| `Repository` | The indexed project |
+| `File`, `Directory` | Source files and their directory tree |
+| `Function`, `Class`, `Variable`, `Module` | Code entities extracted by tree-sitter |
+| `Parameter` | Function parameters |
 
-# 2. Configure Neo4j credentials (pick one)
-cp .env.example .env              # edit with your Neo4j creds
-# — or use CGC's existing config at ~/.codegraphcontext/.env
-
-# 3. Run
-npx tsx src/index.ts watch /path/to/repo
-```
-
-That's it — the watcher is running. Edit a `.ts`/`.js` file in your repo and the graph updates within seconds.
+| Relationship | Meaning |
+|--------------|---------|
+| `CONTAINS` | File/directory contains entities |
+| `CALLS` | Function calls another function (with line number) |
+| `IMPORTS` | File imports from another file/module |
+| `INHERITS` | Class extends another class |
+| `HAS_PARAMETER` | Function has parameter |
 
 ## Prerequisites
 
-- Node.js >= 18
-- Neo4j (running, with CGC schema — run `cgc index --force .` once for initial setup)
+- **Node.js** >= 18
+- **Neo4j** running (Docker recommended, see below)
+- **CGC** (`pip install codegraphcontext`) for initial indexing
 
-## Global Command (optional)
-
-To use `codes2graph` instead of `npx tsx src/index.ts`:
-
-```bash
-npm run build && npm link
-```
-
-All examples below use `npx tsx src/index.ts`. If you ran the above, substitute `codes2graph`.
-
-## Usage
+### Neo4j via Docker (recommended)
 
 ```bash
-# Watch for changes (dev)
-npx tsx src/index.ts watch /path/to/repo
-
-# Watch with options
-npx tsx src/index.ts watch /path/to/repo --debounce 3000 --max-wait 20000 --index-source --skip-external
-
-# Clean ignored files from graph
-npx tsx src/index.ts clean /path/to/repo --dry-run   # preview
-npx tsx src/index.ts clean /path/to/repo              # delete
+docker run -d \
+  --name cgc-neo4j \
+  --restart unless-stopped \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/password \
+  neo4j:5-community
 ```
 
-If you installed globally (`npm link`), replace `npx tsx src/index.ts` with `codes2graph`.
+The `--restart unless-stopped` flag auto-starts the container on boot.
 
-### Watch Options
+---
+
+## Step 1: Install codes2graph
+
+```bash
+git clone https://github.com/nyem69/codes2graph.git
+cd codes2graph
+npm install
+bash scripts/setup-wasm.sh
+```
+
+Configure Neo4j credentials (pick one):
+
+```bash
+cp .env.example .env              # edit NEO4J_PASSWORD
+# -- or reuse CGC's config at ~/.codegraphcontext/.env
+```
+
+## Step 2: Index a new project
+
+CGC does the initial full index. Run this from your project directory:
+
+```bash
+cd /path/to/your-project
+cgc index --force .
+```
+
+This creates the full graph (all files, functions, classes, relationships). Only needed once per project.
+
+## Step 3: Clean ignored files
+
+`cgc index` does not respect `.cgcignore` -- it indexes everything including `node_modules/`, `.svelte-kit/`, build output, etc. Clean those out:
+
+```bash
+# Preview what would be removed
+npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project --dry-run
+
+# Remove them
+npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project
+```
+
+Create a `.cgcignore` in your project root if you don't have one (same syntax as `.gitignore`):
+
+```
+node_modules
+.svelte-kit
+dist
+build
+.wrangler
+```
+
+## Step 4: Start the watcher
+
+```bash
+npx tsx /path/to/codes2graph/src/index.ts watch /path/to/your-project
+```
+
+The watcher is now running. Edit any `.ts`/`.js` file and the graph updates within seconds.
+
+### Watch options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--debounce <ms>` | 5000 | Quiet period before processing batch |
+| `--debounce <ms>` | 5000 | Quiet period before processing a batch |
 | `--max-wait <ms>` | 30000 | Max wait before forced processing |
 | `--index-source` | false | Store full source code in graph nodes |
 | `--skip-external` | false | Skip unresolved external function calls |
 
-### Clean Options
+---
 
-| Flag | Description |
-|------|-------------|
-| `--dry-run` | Show what would be deleted without deleting |
+## Adding a New Project (cheatsheet)
 
-## Relationship to CGC
-
-codes2graph **does not replace** `cgc mcp start` — it only replaces the broken `cgc watch` command. The workflow:
-
-1. **`cgc index --force .`** — one-time full index of a repo (already done for your repos)
-2. **`npx tsx src/index.ts watch /path/to/repo`** — keeps that repo's graph fresh as you edit
-3. **`cgc mcp start`** — unchanged, reads from Neo4j as before
-
-You only need to run the watcher on the repo you're actively editing. If you're working on multiple repos simultaneously, run one watcher per repo. CGC MCP reads from the same shared Neo4j database regardless.
-
-## Cleaning Ignored Files
-
-`cgc index --force` does **not** respect `.cgcignore` — it indexes everything, including directories like `.wrangler/`, `node_modules/`, `.svelte-kit/`, etc. This pollutes the graph with thousands of irrelevant nodes that show up in `cgc analyze dead-code` and other queries.
-
-Run `clean` after any full reindex to remove them:
+Once codes2graph is installed, these are the only steps for each new project:
 
 ```bash
-# Preview what would be deleted
-npx tsx src/index.ts clean /path/to/repo --dry-run
-
-# Delete ignored files from the graph
-npx tsx src/index.ts clean /path/to/repo
+cd /path/to/new-project
+cgc index --force .
+npx tsx /path/to/codes2graph/src/index.ts clean /path/to/new-project
+npx tsx /path/to/codes2graph/src/index.ts watch /path/to/new-project
 ```
 
-This reads your `.cgcignore` (plus built-in defaults), finds all matching File nodes in Neo4j, and deletes them along with their contained Functions, Classes, Variables, etc.
+---
 
-**Recommended workflow after reindexing:**
+## Running as a Background Service (macOS)
+
+Instead of keeping a terminal open, install the watcher as a launchd service that starts automatically on login and restarts on crash.
+
+### Build first
+
+The service uses compiled JS for lower overhead:
+
 ```bash
-cgc index --force .                                # full reindex (doesn't respect .cgcignore)
-npx tsx src/index.ts clean /path/to/repo           # remove ignored files from graph
+cd /path/to/codes2graph
+npm run build
 ```
 
-## How It Works
+### Create the plist
 
-On file change:
+Create `~/Library/LaunchAgents/com.codes2graph.REPO_NAME.plist`:
 
-1. **Debounce** — Collect changes for 5s of quiet (or 30s max), then process as a batch
-2. **Delete** — Remove old graph nodes for changed files
-3. **Parse** — Parse each file with tree-sitter (TS/JS/TSX/JSX)
-4. **Write** — Create new nodes (Function, Class, Variable, Module, Parameter) and relationships (CONTAINS, IMPORTS, HAS_PARAMETER)
-5. **Resolve** — Resolve cross-file CALLS and INHERITS using an incremental symbol map
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.codes2graph.REPO_NAME</string>
 
-The symbol map (`symbolName -> Set<filePath>`) is maintained incrementally per-file instead of CGC's full-rebuild approach.
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>ulimit -n 65536; exec NODE_PATH dist/index.js watch /path/to/repo</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>CODES2GRAPH_PATH</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>NODE_DIR:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>HOME_DIR</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>HOME_DIR/Library/Logs/codes2graph-REPO_NAME.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>HOME_DIR/Library/Logs/codes2graph-REPO_NAME.err</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+</dict>
+</plist>
+```
+
+Replace the placeholders:
+
+| Placeholder | Example |
+|-------------|---------|
+| `REPO_NAME` | `plusdrive` |
+| `NODE_PATH` | `/Users/you/.nvm/versions/node/v22.12.0/bin/node` (run `which node`) |
+| `NODE_DIR` | `/Users/you/.nvm/versions/node/v22.12.0/bin` |
+| `CODES2GRAPH_PATH` | `/Users/you/codes2graph` |
+| `HOME_DIR` | `/Users/you` |
+| `/path/to/repo` | `/Users/you/projects/plusdrive` |
+
+### Load the service
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.codes2graph.REPO_NAME.plist
+```
+
+### Manage the service
+
+```bash
+# Check running watchers
+launchctl list | grep codes2graph
+
+# View logs
+tail -f ~/Library/Logs/codes2graph-REPO_NAME.log
+
+# Stop
+launchctl unload ~/Library/LaunchAgents/com.codes2graph.REPO_NAME.plist
+
+# Restart (after code changes to codes2graph)
+cd /path/to/codes2graph && npm run build
+launchctl unload ~/Library/LaunchAgents/com.codes2graph.REPO_NAME.plist
+launchctl load ~/Library/LaunchAgents/com.codes2graph.REPO_NAME.plist
+```
+
+See [docs/002-Launchd-Deployment.md](docs/002-Launchd-Deployment.md) for troubleshooting (EMFILE errors, stale processes, debugging).
+
+---
+
+## Viewing the Graph
+
+Open [http://localhost:7474](http://localhost:7474) (Neo4j Browser) and run Cypher queries:
+
+```cypher
+-- All nodes for a file
+MATCH (f:File {relative_path: "src/lib/server/db.ts"})-[:CONTAINS]->(n) RETURN f, n
+
+-- Call graph
+MATCH (a)-[r:CALLS]->(b) RETURN a, r, b LIMIT 100
+
+-- Inheritance tree
+MATCH (a)-[r:INHERITS]->(b) RETURN a, r, b
+
+-- List all indexed repos
+MATCH (r:Repository) RETURN r.name, r.path
+```
+
+Other viewers: [Neo4j Desktop](https://neo4j.com/download/), [Neo4j Bloom](https://neo4j.com/product/bloom/), [Neodash](https://neodash.graphapp.io)
 
 ## Supported Languages
 
 - TypeScript (`.ts`, `.tsx`)
 - JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`)
+
+## How It Works
+
+On file save:
+
+1. **Debounce** -- Collect changes for 5s of quiet (30s max), then process as a batch
+2. **Delete** -- Remove old graph nodes for the changed file
+3. **Parse** -- Parse the file with tree-sitter
+4. **Write** -- Create new nodes and relationships
+5. **Resolve** -- Resolve cross-file CALLS and INHERITS using an incremental symbol map
+
+The symbol map (`symbolName -> Set<filePath>`) is maintained incrementally per-file instead of rebuilding the full graph.
+
+## Environment Variables
+
+```
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=password
+INDEX_SOURCE=false
+SKIP_EXTERNAL_RESOLUTION=false
+```
+
+Config is loaded from (in priority order):
+1. `.env` in your project directory
+2. `.env` in the codes2graph directory
+3. `~/.codegraphcontext/.env` (CGC's default)
 
 ## Project Structure
 
@@ -133,11 +309,11 @@ The symbol map (`symbolName -> Set<filePath>`) is maintained incrementally per-f
 src/
   index.ts        CLI entry point
   watcher.ts      chokidar file watcher + BatchDebouncer
-  parser.ts       tree-sitter parsing (ports CGC's Python queries)
-  graph.ts        Neo4j CRUD matching CGC's exact Cypher queries
+  parser.ts       tree-sitter parsing (TS/JS/TSX/JSX)
+  graph.ts        Neo4j CRUD (CGC-compatible schema)
   symbols.ts      Incremental global symbol map
-  resolver.ts     CALLS/INHERITS resolution (local -> import -> global)
-  ignore.ts       .cgcignore pattern loading
+  resolver.ts     CALLS/INHERITS resolution
+  ignore.ts       .cgcignore parser
   config.ts       .env config loading
   types.ts        Shared TypeScript interfaces
 scripts/
@@ -151,40 +327,7 @@ npm test              # run all tests
 npm run test:watch    # watch mode
 ```
 
-Integration tests require a running Neo4j instance and will gracefully skip if unavailable.
-
-## Viewing the Graph
-
-Open the Neo4j Browser at [http://localhost:7474](http://localhost:7474) (already running with your Neo4j instance). Example queries:
-
-```cypher
--- All nodes for a file
-MATCH (f:File {relative_path: "src/lib/server/db.ts"})-[:CONTAINS]->(n) RETURN f, n
-
--- Call graph
-MATCH (a)-[r:CALLS]->(b) RETURN a, r, b LIMIT 100
-
--- Inheritance tree
-MATCH (a)-[r:INHERITS]->(b) RETURN a, r, b
-```
-
-Other viewers:
-
-| Tool | Description |
-|------|-------------|
-| [Neo4j Desktop](https://neo4j.com/download/) | Free desktop app with browser + plugins |
-| [Neo4j Bloom](https://neo4j.com/product/bloom/) | Interactive graph exploration (included in Neo4j Desktop) |
-| [Neodash](https://neodash.graphapp.io) | Open-source dashboard builder for Neo4j |
-
-## Environment Variables
-
-```
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=password
-INDEX_SOURCE=false
-SKIP_EXTERNAL_RESOLUTION=false
-```
+Integration tests require a running Neo4j instance and will skip if unavailable.
 
 ## License
 
