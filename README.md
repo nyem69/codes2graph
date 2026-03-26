@@ -6,16 +6,50 @@
 [![Neo4j](https://img.shields.io/badge/Neo4j-5.x-4581C3?logo=neo4j&logoColor=white)](https://neo4j.com)
 [![Vitest](https://img.shields.io/badge/Tested_with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev)
 
-Watches your codebase and keeps a Neo4j graph of functions, classes, imports, and call relationships up-to-date as you edit. Changes are processed incrementally (<2s per file) instead of rebuilding the entire graph.
+Indexes your codebase into a Neo4j graph and keeps it up-to-date as you edit. Parses functions, classes, imports, and call relationships using tree-sitter, with incremental updates targeting <2s per file change.
 
 The graph follows the [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) (CGC) schema, so CGC's MCP tools work out of the box. Any tool that reads Neo4j can also query the graph directly.
 
 ```
-Editor --> file save --> codes2graph --> Neo4j <-- any Neo4j reader
-                                              <-- cgc mcp start (CGC MCP tools)
-                                              <-- Neo4j Browser
-                                              <-- custom queries
+codes2graph index  -->  Neo4j  <--  cgc mcp start (MCP tools)
+codes2graph watch  -->          <--  Neo4j Browser
+                                <--  custom Cypher queries
 ```
+
+## Quick Start
+
+```bash
+# Install
+git clone https://github.com/nyem69/codes2graph.git
+cd codes2graph
+npm install && bash scripts/setup-wasm.sh
+
+# Configure (pick one)
+cp .env.example .env              # edit NEO4J_PASSWORD
+# -- or reuse CGC's config at ~/.codegraphcontext/.env
+
+# Index a project
+npx tsx src/index.ts index /path/to/your-project
+
+# Watch for changes
+npx tsx src/index.ts watch /path/to/your-project
+```
+
+## Prerequisites
+
+- **Node.js** >= 18
+- **Neo4j** running (Docker recommended):
+
+```bash
+docker run -d \
+  --name cgc-neo4j \
+  --restart unless-stopped \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/password \
+  neo4j:5-community
+```
+
+The `--restart unless-stopped` flag auto-starts the container on boot.
 
 ## What's in the Graph
 
@@ -34,60 +68,20 @@ Editor --> file save --> codes2graph --> Neo4j <-- any Neo4j reader
 | `INHERITS` | Class extends another class |
 | `HAS_PARAMETER` | Function has parameter |
 
-## Prerequisites
-
-- **Node.js** >= 18
-- **Neo4j** running (Docker recommended, see below)
-- **CGC** (`pip install codegraphcontext`) for initial indexing
-
-### Neo4j via Docker (recommended)
-
-```bash
-docker run -d \
-  --name cgc-neo4j \
-  --restart unless-stopped \
-  -p 7474:7474 -p 7687:7687 \
-  -e NEO4J_AUTH=neo4j/password \
-  neo4j:5-community
-```
-
-The `--restart unless-stopped` flag auto-starts the container on boot.
-
 ---
 
-## Step 1: Install codes2graph
+## Commands
+
+All examples use `npx tsx src/index.ts` run from the codes2graph directory. If you prefer a global command, run `npm run build && npm link` and substitute `codes2graph`.
+
+### index -- Full index of a project
 
 ```bash
-git clone https://github.com/nyem69/codes2graph.git
-cd codes2graph
-npm install
-bash scripts/setup-wasm.sh
+npx tsx src/index.ts index /path/to/project
+npx tsx src/index.ts index /path/to/project --force    # wipe and re-index from scratch
 ```
 
-Configure Neo4j credentials (pick one):
-
-```bash
-cp .env.example .env              # edit NEO4J_PASSWORD
-# -- or reuse CGC's config at ~/.codegraphcontext/.env
-```
-
-## Step 2: Index a new project
-
-Run from anywhere -- point it at your project:
-
-```bash
-npx tsx /path/to/codes2graph/src/index.ts index /path/to/your-project
-```
-
-This scans all `.ts`/`.js` files (respecting `.cgcignore`), parses them with tree-sitter, and writes the full graph to Neo4j. Progress is reported as it runs.
-
-To re-index from scratch (wipes existing graph data for this repo):
-
-```bash
-npx tsx /path/to/codes2graph/src/index.ts index /path/to/your-project --force
-```
-
-### Index options
+Scans all `.ts`/`.js` files (respecting `.cgcignore`), parses them with tree-sitter, and writes the full graph to Neo4j.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -96,26 +90,13 @@ npx tsx /path/to/codes2graph/src/index.ts index /path/to/your-project --force
 | `--index-source` | false | Store full source code in graph nodes |
 | `--skip-external` | false | Skip unresolved external function calls |
 
-## Step 3: Clean ignored files (only after `cgc index`)
-
-> Skip this step if you used codes2graph's `index` command -- it already respects `.cgcignore`.
-
-If you used `cgc index` (the Python tool) instead, you need to clean ignored files separately because `cgc index` does not respect `.cgcignore`:
+### watch -- Incremental updates on file change
 
 ```bash
-npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project --dry-run   # preview
-npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project              # delete
+npx tsx src/index.ts watch /path/to/project
 ```
 
-## Step 4: Start the watcher
-
-```bash
-npx tsx /path/to/codes2graph/src/index.ts watch /path/to/your-project
-```
-
-The watcher is now running. Edit any `.ts`/`.js` file and the graph updates within seconds.
-
-### Watch options
+Watches the project for file changes and updates the graph incrementally. Run this after `index` to keep the graph fresh.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -124,15 +105,32 @@ The watcher is now running. Edit any `.ts`/`.js` file and the graph updates with
 | `--index-source` | false | Store full source code in graph nodes |
 | `--skip-external` | false | Skip unresolved external function calls |
 
----
-
-## Adding a New Project (cheatsheet)
-
-Once codes2graph is installed, these are the only steps for each new project:
+### clean -- Remove ignored files from graph
 
 ```bash
-npx tsx /path/to/codes2graph/src/index.ts index /path/to/new-project
-npx tsx /path/to/codes2graph/src/index.ts watch /path/to/new-project
+npx tsx src/index.ts clean /path/to/project --dry-run   # preview
+npx tsx src/index.ts clean /path/to/project              # delete
+```
+
+Only needed if you used `cgc index` (the Python tool), which does not respect `.cgcignore`. The codes2graph `index` command respects `.cgcignore` automatically.
+
+---
+
+## Adding a New Project
+
+```bash
+npx tsx src/index.ts index /path/to/new-project
+npx tsx src/index.ts watch /path/to/new-project
+```
+
+That's it. Create a `.cgcignore` in your project root to exclude directories (same syntax as `.gitignore`):
+
+```
+node_modules
+.svelte-kit
+dist
+build
+.wrangler
 ```
 
 ---
@@ -215,14 +213,14 @@ Create `~/Library/LaunchAgents/com.codes2graph.REPO_NAME.plist`:
 
 Replace the placeholders:
 
-| Placeholder | Example |
-|-------------|---------|
-| `REPO_NAME` | `plusdrive` |
-| `NODE_PATH` | `/Users/you/.nvm/versions/node/v22.12.0/bin/node` (run `which node`) |
-| `NODE_DIR` | `/Users/you/.nvm/versions/node/v22.12.0/bin` |
-| `CODES2GRAPH_PATH` | `/Users/you/codes2graph` |
-| `HOME_DIR` | `/Users/you` |
-| `/path/to/repo` | `/Users/you/projects/plusdrive` |
+| Placeholder | Find with | Example |
+|-------------|-----------|---------|
+| `REPO_NAME` | -- | `plusdrive` |
+| `NODE_PATH` | `which node` | `/Users/you/.nvm/versions/node/v22.12.0/bin/node` |
+| `NODE_DIR` | `dirname $(which node)` | `/Users/you/.nvm/versions/node/v22.12.0/bin` |
+| `CODES2GRAPH_PATH` | -- | `/Users/you/codes2graph` |
+| `HOME_DIR` | `echo $HOME` | `/Users/you` |
+| `/path/to/repo` | -- | `/Users/you/projects/plusdrive` |
 
 ### Load the service
 
@@ -279,15 +277,9 @@ Other viewers: [Neo4j Desktop](https://neo4j.com/download/), [Neo4j Bloom](https
 
 ## How It Works
 
-On file save:
+**Full index (`index`):** Walk repo, discover files, filter by `.cgcignore`, parse each file with tree-sitter, write nodes and relationships to Neo4j, resolve cross-file CALLS and INHERITS using a symbol map.
 
-1. **Debounce** -- Collect changes for 5s of quiet (30s max), then process as a batch
-2. **Delete** -- Remove old graph nodes for the changed file
-3. **Parse** -- Parse the file with tree-sitter
-4. **Write** -- Create new nodes and relationships
-5. **Resolve** -- Resolve cross-file CALLS and INHERITS using an incremental symbol map
-
-The symbol map (`symbolName -> Set<filePath>`) is maintained incrementally per-file instead of rebuilding the full graph.
+**Incremental updates (`watch`):** On file save, debounce changes (5s quiet / 30s max), then for each changed file: delete old nodes, re-parse, write new nodes, re-resolve relationships. The symbol map is maintained incrementally per-file.
 
 ## Environment Variables
 
@@ -308,8 +300,10 @@ Config is loaded from (in priority order):
 
 ```
 src/
-  index.ts        CLI entry point
+  index.ts        CLI entry point (index, watch, clean commands)
+  indexer.ts      Full repo indexer (file discovery + batch orchestration)
   watcher.ts      chokidar file watcher + BatchDebouncer
+  pipeline.ts     Shared parse -> graph -> resolve pipeline
   parser.ts       tree-sitter parsing (TS/JS/TSX/JSX)
   graph.ts        Neo4j CRUD (CGC-compatible schema)
   symbols.ts      Incremental global symbol map
