@@ -117,3 +117,11 @@ export interface WatchOptions {
   indexSource: boolean;    // store full source code in graph
   skipExternal: boolean;  // skip unresolved external calls
 }
+
+export interface IndexOptions {
+  extensions: string[];   // file extensions to index
+  indexSource: boolean;    // store full source code in graph
+  skipExternal: boolean;  // skip unresolved external calls
+  batchSize: number;      // files per batch (default: 50)
+  force: boolean;         // wipe existing graph for this repo first
+}

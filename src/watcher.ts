@@ -1,11 +1,10 @@
 import chokidar, { type FSWatcher } from 'chokidar';
 import { resolve, extname, relative } from 'path';
-import { existsSync } from 'fs';
-import type { WatchOptions, ParsedFile } from './types.js';
+import type { WatchOptions } from './types.js';
 import type { GraphClient } from './graph.js';
 import type { Parser } from './parser.js';
 import type { SymbolMap } from './symbols.js';
-import { resolveCallsForFile, resolveInheritanceForFile } from './resolver.js';
+import { processFiles } from './pipeline.js';
 import { loadIgnorePatterns, isIgnored } from './ignore.js';
 
 // ─── Debouncer (exported for testing) ──────────────────
@@ -131,58 +130,22 @@ export class Watcher {
     const startTime = Date.now();
     console.log(`Processing batch of ${batch.size} file(s)...`);
 
-    for (const filePath of batch) {
-      this.symbolMap.removeFile(filePath);
-      await this.graph.deleteOutgoingCalls(filePath);
-      await this.graph.deleteFile(filePath);
-    }
-
-    const parsedFiles: ParsedFile[] = [];
-    for (const filePath of batch) {
-      if (!existsSync(filePath)) {
-        console.log(`  Deleted: ${relative(repoPath, filePath)}`);
-        continue;
-      }
-
-      try {
-        const parsed = this.parser.parseFile(filePath, this.options.indexSource);
-        this.symbolMap.addFile(filePath, parsed);
-        await this.graph.addFileToGraph(parsed, repoPath);
-        parsedFiles.push(parsed);
-        console.log(`  Updated: ${relative(repoPath, filePath)}`);
-      } catch (err) {
-        console.error(`  Error parsing ${filePath}:`, err);
-      }
-    }
-
-    for (const parsed of parsedFiles) {
-      const calls = resolveCallsForFile(parsed, this.symbolMap, this.options.skipExternal);
-      for (const call of calls) {
-        if (call.caller_name === '') {
-          await this.graph.createFileLevelCallRelationship(
-            call.caller_file_path, call.called_name, call.called_file_path,
-            call.line_number, call.args, call.full_call_name,
-          );
-        } else {
-          await this.graph.createCallRelationship(
-            call.caller_name, call.caller_file_path, call.caller_line_number,
-            call.called_name, call.called_file_path,
-            call.line_number, call.args, call.full_call_name,
-          );
-        }
-      }
-
-      const inheritance = resolveInheritanceForFile(parsed, this.symbolMap);
-      for (const inh of inheritance) {
-        await this.graph.createInheritsRelationship(
-          inh.child_name, inh.child_file_path, inh.parent_name, inh.parent_file_path,
-        );
-      }
-
-      await this.graph.cleanStaleCallsTo(parsed.path);
-    }
+    const result = await processFiles(
+      repoPath,
+      Array.from(batch),
+      this.graph,
+      this.parser,
+      this.symbolMap,
+      { indexSource: this.options.indexSource, skipExternal: this.options.skipExternal },
+      ({ file, status, error }) => {
+        const rel = relative(repoPath, file);
+        if (status === 'deleted') console.log(`  Deleted: ${rel}`);
+        else if (status === 'error') console.error(`  Error parsing ${rel}:`, error);
+        else console.log(`  Updated: ${rel}`);
+      },
+    );
 
     const elapsed = Date.now() - startTime;
-    console.log(`Batch complete in ${elapsed}ms`);
+    console.log(`Batch complete in ${elapsed}ms (${result.parsed} parsed, ${result.deleted} deleted, ${result.errors} errors)`);
   }
 }

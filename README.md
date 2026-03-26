@@ -73,35 +73,38 @@ cp .env.example .env              # edit NEO4J_PASSWORD
 
 ## Step 2: Index a new project
 
-CGC does the initial full index. Run this from your project directory:
+Run from anywhere -- point it at your project:
 
 ```bash
-cd /path/to/your-project
-cgc index --force .
+npx tsx /path/to/codes2graph/src/index.ts index /path/to/your-project
 ```
 
-This creates the full graph (all files, functions, classes, relationships). Only needed once per project.
+This scans all `.ts`/`.js` files (respecting `.cgcignore`), parses them with tree-sitter, and writes the full graph to Neo4j. Progress is reported as it runs.
 
-## Step 3: Clean ignored files
-
-`cgc index` does not respect `.cgcignore` -- it indexes everything including `node_modules/`, `.svelte-kit/`, build output, etc. Clean those out:
+To re-index from scratch (wipes existing graph data for this repo):
 
 ```bash
-# Preview what would be removed
-npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project --dry-run
-
-# Remove them
-npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project
+npx tsx /path/to/codes2graph/src/index.ts index /path/to/your-project --force
 ```
 
-Create a `.cgcignore` in your project root if you don't have one (same syntax as `.gitignore`):
+### Index options
 
-```
-node_modules
-.svelte-kit
-dist
-build
-.wrangler
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | false | Wipe existing graph data for this repo first |
+| `--batch-size <n>` | 50 | Files per processing batch |
+| `--index-source` | false | Store full source code in graph nodes |
+| `--skip-external` | false | Skip unresolved external function calls |
+
+## Step 3: Clean ignored files (only after `cgc index`)
+
+> Skip this step if you used codes2graph's `index` command -- it already respects `.cgcignore`.
+
+If you used `cgc index` (the Python tool) instead, you need to clean ignored files separately because `cgc index` does not respect `.cgcignore`:
+
+```bash
+npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project --dry-run   # preview
+npx tsx /path/to/codes2graph/src/index.ts clean /path/to/your-project              # delete
 ```
 
 ## Step 4: Start the watcher
@@ -128,9 +131,7 @@ The watcher is now running. Edit any `.ts`/`.js` file and the graph updates with
 Once codes2graph is installed, these are the only steps for each new project:
 
 ```bash
-cd /path/to/new-project
-cgc index --force .
-npx tsx /path/to/codes2graph/src/index.ts clean /path/to/new-project
+npx tsx /path/to/codes2graph/src/index.ts index /path/to/new-project
 npx tsx /path/to/codes2graph/src/index.ts watch /path/to/new-project
 ```
 

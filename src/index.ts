@@ -5,6 +5,7 @@ import { GraphClient } from './graph.js';
 import { Parser } from './parser.js';
 import { SymbolMap } from './symbols.js';
 import { Watcher } from './watcher.js';
+import { Indexer } from './indexer.js';
 import { loadIgnorePatterns, isIgnored } from './ignore.js';
 import type { WatchOptions } from './types.js';
 
@@ -12,8 +13,15 @@ function printUsage() {
   console.log('Usage: codes2graph <command> <path> [options]');
   console.log('');
   console.log('Commands:');
+  console.log('  index <path>        Full index of a repo into Neo4j');
   console.log('  watch <path>        Watch repo for changes and update graph');
   console.log('  clean <path>        Remove ignored files from Neo4j graph');
+  console.log('');
+  console.log('Index options:');
+  console.log('  --force             Wipe existing graph data for this repo first');
+  console.log('  --batch-size <n>    Files per batch (default: 50)');
+  console.log('  --index-source      Store full source code in graph');
+  console.log('  --skip-external     Skip unresolved external calls');
   console.log('');
   console.log('Watch options:');
   console.log('  --debounce <ms>     Quiet period before processing (default: 5000)');
@@ -112,9 +120,43 @@ async function cleanIgnored(repoPath: string, dryRun: boolean) {
   }
 }
 
+async function index(repoPath: string, args: string[]) {
+  const config = loadConfig();
+  const batchSizeIdx = args.indexOf('--batch-size');
+  const batchSize = batchSizeIdx !== -1 ? parseInt(args[batchSizeIdx + 1], 10) : 50;
+
+  console.log('codes2graph — full index');
+  console.log(`Repository: ${repoPath}`);
+  console.log(`Neo4j: ${config.neo4jUri}`);
+
+  const graph = new GraphClient(config);
+  await graph.connect();
+  await graph.ensureSchema();
+  await graph.createRepository(repoPath, basename(repoPath));
+
+  const parser = new Parser();
+  await parser.init();
+
+  const indexer = new Indexer(graph, parser, {
+    extensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'],
+    indexSource: args.includes('--index-source') || config.indexSource,
+    skipExternal: args.includes('--skip-external') || config.skipExternal,
+    batchSize,
+    force: args.includes('--force'),
+  });
+
+  try {
+    await indexer.run(repoPath);
+  } finally {
+    await graph.close();
+  }
+}
+
 async function watch(repoPath: string, args: string[]) {
-  const debounceQuiet = parseInt(args[args.indexOf('--debounce') + 1] || '5000', 10);
-  const debounceMax = parseInt(args[args.indexOf('--max-wait') + 1] || '30000', 10);
+  const debounceIdx = args.indexOf('--debounce');
+  const debounceQuiet = debounceIdx !== -1 ? parseInt(args[debounceIdx + 1], 10) : 5000;
+  const maxWaitIdx = args.indexOf('--max-wait');
+  const debounceMax = maxWaitIdx !== -1 ? parseInt(args[maxWaitIdx + 1], 10) : 30000;
 
   const config = loadConfig();
   const options: WatchOptions = {
@@ -156,14 +198,16 @@ async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
 
-  if (!command || !['watch', 'clean'].includes(command) || args.length < 2) {
+  if (!command || !['index', 'watch', 'clean'].includes(command) || args.length < 2) {
     printUsage();
     process.exit(1);
   }
 
   const repoPath = resolve(args[1]);
 
-  if (command === 'clean') {
+  if (command === 'index') {
+    await index(repoPath, args);
+  } else if (command === 'clean') {
     await cleanIgnored(repoPath, args.includes('--dry-run'));
   } else {
     await watch(repoPath, args);
