@@ -13,6 +13,8 @@ const DEFAULT_PATTERNS = [
   'dist/**',
   'build',
   'build/**',
+  '.wrangler',
+  '.wrangler/**',
   '.git',
   '.git/**',
   '.claude',
@@ -22,6 +24,10 @@ const DEFAULT_PATTERNS = [
 ];
 
 export function loadIgnorePatterns(startPath: string): string[] {
+  // Always start with defaults
+  const patterns = [...DEFAULT_PATTERNS];
+
+  // Find and merge .cgcignore if it exists
   let dir = resolve(startPath);
   while (true) {
     const candidate = resolve(dir, '.cgcignore');
@@ -31,24 +37,24 @@ export function loadIgnorePatterns(startPath: string): string[] {
         .map(l => l.trim())
         .filter(l => l && !l.startsWith('#'))
         .map(l => l.replace(/^\/+/, '')); // strip leading slashes (gitignore-style root anchors)
-      const expanded: string[] = [];
       for (const p of lines) {
         if (p.endsWith('/')) {
-          expanded.push(p.slice(0, -1));  // bare dir name
-          expanded.push(p + '**');         // contents
+          patterns.push(p.slice(0, -1));  // bare dir name
+          patterns.push(p + '**');         // contents
         } else {
-          expanded.push(p);
+          patterns.push(p);
           // Also add bare dir for dir/** patterns
-          if (p.endsWith('/**')) expanded.push(p.slice(0, -3));
+          if (p.endsWith('/**')) patterns.push(p.slice(0, -3));
         }
       }
-      return expanded;
+      break;
     }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return DEFAULT_PATTERNS;
+
+  return patterns;
 }
 
 export function isIgnored(relativePath: string, patterns: string[]): boolean {
