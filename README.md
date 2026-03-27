@@ -10,10 +10,14 @@ Indexes your codebase into a Neo4j graph and keeps it up-to-date as you edit. Pa
 
 The graph follows the [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) (CGC) schema, so CGC's MCP tools work out of the box. Any tool that reads Neo4j can also query the graph directly.
 
-```
-codes2graph index  -->  Neo4j  <--  cgc mcp start (MCP tools)
-codes2graph watch  -->          <--  Neo4j Browser
-                                <--  custom Cypher queries
+```mermaid
+graph LR
+    A[codes2graph index] -->|write| N[(Neo4j)]
+    B[codes2graph watch] -->|incremental write| N
+    N -->|read| C[cgc mcp start]
+    N -->|read| D[Neo4j Browser]
+    N -->|read| E[Custom Cypher]
+    C -->|MCP| F[Claude Code]
 ```
 
 ## Why a Graph?
