@@ -62,12 +62,25 @@ export class Indexer {
    */
   async wipeRepo(repoPath: string): Promise<void> {
     console.log('Wiping existing graph data...');
-    await this.graph.runCypher(
-      `MATCH (f:File) WHERE f.path STARTS WITH $repoPath
-       OPTIONAL MATCH (f)-[:CONTAINS]->(child)
-       DETACH DELETE child, f`,
-      { repoPath },
-    );
+    // Batched delete to avoid Neo4j memory limit on large repos
+    let deleted = 0;
+    while (true) {
+      const result = await this.graph.runCypher(
+        `MATCH (f:File) WHERE f.path STARTS WITH $repoPath
+         WITH f LIMIT 100
+         OPTIONAL MATCH (f)-[:CONTAINS]->(child)
+         DETACH DELETE child
+         WITH f
+         DETACH DELETE f
+         RETURN count(f) as deleted`,
+        { repoPath },
+      );
+      const batch = (result[0]?.deleted as number) || 0;
+      if (batch === 0) break;
+      deleted += batch;
+      process.stdout.write(`\rWiped ${deleted} files...`);
+    }
+    if (deleted > 0) process.stdout.write('\n');
     await this.graph.runCypher(
       `MATCH (d:Directory) WHERE d.path STARTS WITH $repoPath
        DETACH DELETE d`,
