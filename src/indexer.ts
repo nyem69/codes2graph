@@ -62,30 +62,55 @@ export class Indexer {
    */
   async wipeRepo(repoPath: string): Promise<void> {
     console.log('Wiping existing graph data...');
-    // Batched delete to avoid Neo4j memory limit on large repos
-    let deleted = 0;
+    // Batched delete to avoid Neo4j memory limit on large repos.
+    // Delete children first (small batches), then files, then directories.
+    let totalDeleted = 0;
+
+    // Phase 1: Delete CONTAINS children in small batches
+    while (true) {
+      const result = await this.graph.runCypher(
+        `MATCH (f:File)-[:CONTAINS]->(child)
+         WHERE f.path STARTS WITH $repoPath
+         WITH child LIMIT 500
+         DETACH DELETE child
+         RETURN count(child) as deleted`,
+        { repoPath },
+      );
+      const batch = (result[0]?.deleted as number) || 0;
+      if (batch === 0) break;
+      totalDeleted += batch;
+      process.stdout.write(`\rWiped ${totalDeleted} nodes...`);
+    }
+
+    // Phase 2: Delete File nodes (now childless)
     while (true) {
       const result = await this.graph.runCypher(
         `MATCH (f:File) WHERE f.path STARTS WITH $repoPath
-         WITH f LIMIT 100
-         OPTIONAL MATCH (f)-[:CONTAINS]->(child)
-         DETACH DELETE child
-         WITH f
+         WITH f LIMIT 500
          DETACH DELETE f
          RETURN count(f) as deleted`,
         { repoPath },
       );
       const batch = (result[0]?.deleted as number) || 0;
       if (batch === 0) break;
-      deleted += batch;
-      process.stdout.write(`\rWiped ${deleted} files...`);
+      totalDeleted += batch;
+      process.stdout.write(`\rWiped ${totalDeleted} nodes...`);
     }
-    if (deleted > 0) process.stdout.write('\n');
-    await this.graph.runCypher(
-      `MATCH (d:Directory) WHERE d.path STARTS WITH $repoPath
-       DETACH DELETE d`,
-      { repoPath },
-    );
+
+    // Phase 3: Delete Directory nodes
+    while (true) {
+      const result = await this.graph.runCypher(
+        `MATCH (d:Directory) WHERE d.path STARTS WITH $repoPath
+         WITH d LIMIT 500
+         DETACH DELETE d
+         RETURN count(d) as deleted`,
+        { repoPath },
+      );
+      const batch = (result[0]?.deleted as number) || 0;
+      if (batch === 0) break;
+      totalDeleted += batch;
+    }
+    if (totalDeleted > 0) process.stdout.write(`\rWiped ${totalDeleted} nodes.\n`);
     // Clean stale Repository nodes for subdirectories (left by cgc index)
     await this.graph.runCypher(
       `MATCH (r:Repository) WHERE r.path STARTS WITH $repoPathSlash
