@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { resolve, basename, relative } from 'path';
+import { readFileSync } from 'fs';
 import { loadConfig } from './config.js';
 import { GraphClient } from './graph.js';
 import { Parser } from './parser.js';
@@ -31,6 +32,26 @@ function printUsage() {
   console.log('');
   console.log('Clean options:');
   console.log('  --dry-run           Show what would be deleted without deleting');
+  console.log('');
+  console.log('Environment:');
+  console.log('  NEO4J_URI             Neo4j connection URI (default: bolt://localhost:7687)');
+  console.log('  NEO4J_USERNAME        Neo4j username (default: neo4j)');
+  console.log('  NEO4J_PASSWORD        Neo4j password');
+  console.log('');
+  console.log('Config files (in priority order):');
+  console.log('  .env                  Local project config');
+  console.log('  ~/.codegraphcontext/.env  CGC shared config');
+}
+
+function warnUnencryptedRemote(neo4jUri: string) {
+  try {
+    const uri = new URL(neo4jUri.replace('bolt://', 'http://').replace('neo4j://', 'http://'));
+    if (!neo4jUri.includes('+s') && uri.hostname !== 'localhost' && uri.hostname !== '127.0.0.1' && uri.hostname !== '::1') {
+      console.warn('Warning: Neo4j connection is not encrypted. Use bolt+s:// for remote servers.');
+    }
+  } catch {
+    // Ignore URL parse errors
+  }
 }
 
 async function cleanIgnored(repoPath: string, dryRun: boolean) {
@@ -40,12 +61,28 @@ async function cleanIgnored(repoPath: string, dryRun: boolean) {
   console.log('codes2graph — clean ignored files from graph');
   console.log(`Repository: ${repoPath}`);
   console.log(`Neo4j: ${config.neo4jUri}`);
+  console.log(`Config: ${config.configSource}`);
   console.log(`Ignore patterns: ${patterns.length} rules loaded`);
   if (dryRun) console.log('Mode: DRY RUN (no deletions)');
   console.log('');
 
   const graph = new GraphClient(config);
-  await graph.connect();
+
+  process.on('SIGINT', async () => {
+    console.log('\nInterrupted.');
+    try { await graph.close(); } catch {}
+    process.exit(130);
+  });
+
+  try {
+    await graph.connect();
+  } catch (err) {
+    console.error(`Error: Could not connect to Neo4j at ${config.neo4jUri}`);
+    console.error(`Is Neo4j running? Check your config at ${config.configSource}`);
+    process.exit(1);
+  }
+
+  warnUnencryptedRemote(config.neo4jUri);
 
   try {
     // Query all File nodes under this repo
@@ -125,12 +162,34 @@ async function index(repoPath: string, args: string[]) {
   const batchSizeIdx = args.indexOf('--batch-size');
   const batchSize = batchSizeIdx !== -1 ? parseInt(args[batchSizeIdx + 1], 10) : 50;
 
+  if (isNaN(batchSize) || batchSize <= 0) {
+    console.error('Error: --batch-size must be a positive integer');
+    process.exit(1);
+  }
+
   console.log('codes2graph — full index');
   console.log(`Repository: ${repoPath}`);
   console.log(`Neo4j: ${config.neo4jUri}`);
+  console.log(`Config: ${config.configSource}`);
 
   const graph = new GraphClient(config);
-  await graph.connect();
+
+  process.on('SIGINT', async () => {
+    console.log('\nInterrupted.');
+    try { await graph.close(); } catch {}
+    process.exit(130);
+  });
+
+  try {
+    await graph.connect();
+  } catch (err) {
+    console.error(`Error: Could not connect to Neo4j at ${config.neo4jUri}`);
+    console.error(`Is Neo4j running? Check your config at ${config.configSource}`);
+    process.exit(1);
+  }
+
+  warnUnencryptedRemote(config.neo4jUri);
+
   await graph.ensureSchema();
   await graph.createRepository(repoPath, basename(repoPath));
 
@@ -158,6 +217,15 @@ async function watch(repoPath: string, args: string[]) {
   const maxWaitIdx = args.indexOf('--max-wait');
   const debounceMax = maxWaitIdx !== -1 ? parseInt(args[maxWaitIdx + 1], 10) : 30000;
 
+  if (isNaN(debounceQuiet) || debounceQuiet <= 0) {
+    console.error('Error: --debounce must be a positive integer');
+    process.exit(1);
+  }
+  if (isNaN(debounceMax) || debounceMax <= 0) {
+    console.error('Error: --max-wait must be a positive integer');
+    process.exit(1);
+  }
+
   const config = loadConfig();
   const options: WatchOptions = {
     debounceQuiet,
@@ -170,9 +238,20 @@ async function watch(repoPath: string, args: string[]) {
   console.log('codes2graph — incremental code graph watcher');
   console.log(`Repository: ${repoPath}`);
   console.log(`Neo4j: ${config.neo4jUri}`);
+  console.log(`Config: ${config.configSource}`);
 
   const graph = new GraphClient(config);
-  await graph.connect();
+
+  try {
+    await graph.connect();
+  } catch (err) {
+    console.error(`Error: Could not connect to Neo4j at ${config.neo4jUri}`);
+    console.error(`Is Neo4j running? Check your config at ${config.configSource}`);
+    process.exit(1);
+  }
+
+  warnUnencryptedRemote(config.neo4jUri);
+
   await graph.ensureSchema();
   await graph.createRepository(repoPath, basename(repoPath));
 
@@ -182,10 +261,13 @@ async function watch(repoPath: string, args: string[]) {
   const symbolMap = new SymbolMap();
   const watcher = new Watcher(graph, parser, symbolMap, options);
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\nShutting down...');
-    await watcher.stop();
-    await graph.close();
+    try { await watcher.stop(); } catch {}
+    try { await graph.close(); } catch {}
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
@@ -196,6 +278,18 @@ async function watch(repoPath: string, args: string[]) {
 
 async function main() {
   const args = process.argv.slice(2);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    printUsage();
+    process.exit(0);
+  }
+
+  if (args.includes('--version') || args.includes('-v')) {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+    console.log(pkg.version);
+    process.exit(0);
+  }
+
   const command = args[0];
 
   if (!command || !['index', 'watch', 'clean'].includes(command) || args.length < 2) {

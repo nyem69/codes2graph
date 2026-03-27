@@ -26,6 +26,7 @@ describe('loadConfig', () => {
     expect(config.neo4jPassword).toBe('password');
     expect(config.indexSource).toBe(false);
     expect(config.skipExternal).toBe(false);
+    expect(config.configSource).toBe('defaults');
   });
 
   it('reads from environment variables', () => {
@@ -41,5 +42,6 @@ describe('loadConfig', () => {
     expect(config.neo4jPassword).toBe('secret');
     expect(config.indexSource).toBe(true);
     expect(config.skipExternal).toBe(true);
+    expect(config.configSource).toBe('defaults');
   });
 });
