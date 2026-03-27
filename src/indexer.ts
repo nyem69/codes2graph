@@ -73,6 +73,12 @@ export class Indexer {
        DETACH DELETE d`,
       { repoPath },
     );
+    // Clean stale Repository nodes for subdirectories (left by cgc index)
+    await this.graph.runCypher(
+      `MATCH (r:Repository) WHERE r.path STARTS WITH $repoPathSlash
+       DETACH DELETE r`,
+      { repoPathSlash: repoPath + '/' },
+    );
     console.log('Wipe complete.');
   }
 
