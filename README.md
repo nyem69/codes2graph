@@ -16,6 +16,23 @@ codes2graph watch  -->          <--  Neo4j Browser
                                 <--  custom Cypher queries
 ```
 
+## Why a Graph?
+
+Standard code search tools (grep, ripgrep, IDE find-references) work on text patterns. A graph database stores the actual structure -- which function calls which, what imports what, how classes inherit. This enables queries that text search can't do well or at all:
+
+| Task | Text search (grep) | Graph query (Neo4j) |
+|------|-------------------|---------------------|
+| Find callers of a function | `grep -r "funcName"` -- includes false matches from comments, strings, similar names | Exact caller→callee edges with line numbers and args |
+| Downstream call analysis | Read source manually, file by file | All callees in one query with full call chain |
+| Cyclomatic complexity | Manual count of branches -- misses ternaries, short-circuits, nested callbacks (~3x underestimate) | AST-based calculation, accurate per function |
+| Cross-repo dependencies | Not possible (one repo at a time) | All indexed repos in one query -- finds importers across projects |
+| Dead code detection | `grep` for each export, manually verify each hit | Automated scan for functions with no incoming CALLS edges |
+| Module coupling | Count imports manually | Structured import graph with inbound/outbound counts |
+
+**Known limitation:** SvelteKit anonymous route handlers (`export const POST = async () => {}`) are correctly parsed by codes2graph as named functions. However, if a repo was indexed with `cgc index` (the Python tool), these show up as file-level calls, causing false positives in dead code detection and broken call chain traversal. Re-indexing with codes2graph fixes this.
+
+<!-- TODO: Add real comparison test results with actual numbers from indexed repos -->
+
 ## Quick Start
 
 ```bash
