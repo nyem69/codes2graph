@@ -1,12 +1,19 @@
 // src/indexer.ts
 import { resolve, relative, extname } from 'path';
-import { readdirSync, statSync } from 'fs';
+import { readdirSync, lstatSync } from 'fs';
 import type { IndexOptions } from './types.js';
 import type { GraphClient } from './graph.js';
 import type { Parser } from './parser.js';
 import { SymbolMap } from './symbols.js';
 import { loadIgnorePatterns, isIgnored } from './ignore.js';
 import { processFiles } from './pipeline.js';
+
+function formatTime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m${s % 60}s`;
+}
 
 export class Indexer {
   constructor(
@@ -40,11 +47,12 @@ export class Indexer {
 
         let stat;
         try {
-          stat = statSync(fullPath);
+          stat = lstatSync(fullPath);
         } catch {
           continue;
         }
 
+        if (stat.isSymbolicLink()) continue; // Skip symlinks
         if (stat.isDirectory()) {
           walk(fullPath);
         } else if (stat.isFile() && extensions.has(extname(fullPath))) {
@@ -154,7 +162,13 @@ export class Indexer {
       const batchNum = Math.floor(i / batchSize) + 1;
       const totalBatches = Math.ceil(files.length / batchSize);
 
-      process.stdout.write(`\rBatch ${batchNum}/${totalBatches} — ${i + batch.length}/${files.length} files`);
+      const elapsed = Date.now() - startTime;
+      const filesProcessed = i + batch.length;
+      const avgPerFile = filesProcessed > 0 ? elapsed / filesProcessed : 0;
+      const remaining = avgPerFile * (files.length - filesProcessed);
+      const elapsedStr = formatTime(elapsed);
+      const etaStr = formatTime(remaining);
+      process.stdout.write(`\rBatch ${batchNum}/${totalBatches} — ${filesProcessed}/${files.length} files [${elapsedStr} elapsed, ~${etaStr} remaining]`);
 
       const result = await processFiles(
         absRepoPath,
@@ -163,6 +177,12 @@ export class Indexer {
         this.parser,
         symbolMap,
         { indexSource: this.options.indexSource, skipExternal: this.options.skipExternal },
+        ({ file, status, error }) => {
+          if (status === 'error') {
+            const rel = relative(absRepoPath, file);
+            console.error(`\n  Error: ${rel}: ${error}`);
+          }
+        },
       );
 
       totalParsed += result.parsed;
