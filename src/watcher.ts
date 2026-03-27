@@ -113,9 +113,10 @@ export class Watcher {
       .on('change', (p) => this.onFileEvent(absRepoPath, p))
       .on('unlink', (p) => this.onFileEvent(absRepoPath, p))
       .on('ready', () => console.log(`Watching ${absRepoPath} for changes (polling mode)...`))
-      .on('error', (err: NodeJS.ErrnoException) => {
+      .on('error', (err: unknown) => {
         console.error('Watcher error:', err);
-        if (err.code === 'EMFILE' || err.code === 'EACCES' || err.code === 'EPERM') {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'EMFILE' || code === 'EACCES' || code === 'EPERM') {
           console.error('Fatal watcher error, exiting.');
           process.exit(1);
         }
