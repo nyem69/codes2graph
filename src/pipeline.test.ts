@@ -10,7 +10,9 @@ describe('processFiles', () => {
       addFileToGraph: vi.fn().mockResolvedValue(undefined),
       createCallRelationship: vi.fn().mockResolvedValue(undefined),
       createFileLevelCallRelationship: vi.fn().mockResolvedValue(undefined),
+      createCallRelationshipsBatch: vi.fn().mockResolvedValue(undefined),
       createInheritsRelationship: vi.fn().mockResolvedValue(undefined),
+      createInheritsRelationshipsBatch: vi.fn().mockResolvedValue(undefined),
       cleanStaleCallsTo: vi.fn().mockResolvedValue(undefined),
     };
 

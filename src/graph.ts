@@ -1,8 +1,39 @@
 // src/graph.ts
 import neo4j, { type Driver, type Session } from 'neo4j-driver';
 import type { Config } from './config.js';
-import type { ParsedFile, ParsedFunction, ParsedImport } from './types.js';
+import type { ParsedFile, ParsedFunction } from './types.js';
+import type { ResolvedCall, ResolvedInheritance } from './types.js';
 import { resolve, relative, basename } from 'path';
+
+// Fix 16: Label whitelist validation for Cypher interpolation safety
+const VALID_LABELS = new Set([
+  'Repository', 'Directory', 'File', 'Function', 'Class',
+  'Variable', 'Interface', 'Module', 'Parameter',
+]);
+
+function assertValidLabel(label: string): void {
+  if (!VALID_LABELS.has(label)) throw new Error(`Invalid Neo4j label: ${label}`);
+}
+
+// Fix 4: Allowlisted properties per label (prevents internal fields leaking to Neo4j)
+const ALLOWED_PROPS: Record<string, string[]> = {
+  Function: ['name', 'line_number', 'end_line', 'args', 'cyclomatic_complexity', 'source', 'docstring', 'decorators', 'lang', 'is_dependency', 'path'],
+  Class: ['name', 'line_number', 'end_line', 'bases', 'source', 'docstring', 'decorators', 'lang', 'is_dependency', 'path'],
+  Variable: ['name', 'line_number', 'value', 'type', 'lang', 'is_dependency', 'path'],
+  Interface: ['name', 'line_number', 'end_line', 'source', 'path'],
+};
+
+function filterProps(item: Record<string, unknown>, label: string): Record<string, unknown> {
+  const allowed = ALLOWED_PROPS[label];
+  if (!allowed) return item;
+  const filtered: Record<string, unknown> = {};
+  for (const key of allowed) {
+    if (key in item && item[key] !== undefined && item[key] !== null) {
+      filtered[key] = item[key];
+    }
+  }
+  return filtered;
+}
 
 export class GraphClient {
   private driver: Driver | null = null;
@@ -66,6 +97,11 @@ export class GraphClient {
       const indexes = [
         'CREATE INDEX function_lang IF NOT EXISTS FOR (f:Function) ON (f.lang)',
         'CREATE INDEX class_lang IF NOT EXISTS FOR (c:Class) ON (c.lang)',
+        // Fix 8: Path-only indexes for faster per-file queries
+        'CREATE INDEX function_path IF NOT EXISTS FOR (f:Function) ON (f.path)',
+        'CREATE INDEX class_path IF NOT EXISTS FOR (c:Class) ON (c.path)',
+        'CREATE INDEX variable_path IF NOT EXISTS FOR (v:Variable) ON (v.path)',
+        'CREATE INDEX interface_path IF NOT EXISTS FOR (i:Interface) ON (i.path)',
         `CREATE FULLTEXT INDEX code_search_index IF NOT EXISTS
          FOR (n:Function|Class|Variable)
          ON EACH [n.name, n.source, n.docstring]`,
@@ -116,6 +152,7 @@ export class GraphClient {
       let parentLabel = 'Repository';
 
       for (const part of parts) {
+        assertValidLabel(parentLabel);
         const currentPath = parentPath + '/' + part;
         await session.run(
           `MATCH (p:${parentLabel} {path: $parent_path})
@@ -129,6 +166,7 @@ export class GraphClient {
       }
 
       // Link final parent to file
+      assertValidLabel(parentLabel);
       await session.run(
         `MATCH (p:${parentLabel} {path: $parent_path})
          MATCH (f:File {path: $path})
@@ -144,6 +182,7 @@ export class GraphClient {
 
   /**
    * Write all nodes and relationships for a parsed file.
+   * Fix 6: Batched with UNWIND queries instead of per-node queries.
    * CGC graph_builder.py:272 add_file_to_graph
    */
   async addFileToGraph(fileData: ParsedFile, repoPath: string): Promise<void> {
@@ -154,111 +193,212 @@ export class GraphClient {
 
     const session = this.getSession();
     try {
-      // Functions, Classes, Variables, Interfaces -- CGC graph_builder.py:330-356
-      const itemMappings: [unknown[], string][] = [
-        [fileData.functions, 'Function'],
-        [fileData.classes, 'Class'],
-        [fileData.variables, 'Variable'],
-        [fileData.interfaces || [], 'Interface'],
-      ];
-
-      for (const [items, label] of itemMappings) {
-        for (const item of items as Record<string, unknown>[]) {
-          // Default cyclomatic_complexity for functions (CGC graph_builder.py:346-347)
-          if (label === 'Function' && !('cyclomatic_complexity' in item)) {
-            item.cyclomatic_complexity = 1;
-          }
-
-          await session.run(
+      await session.executeWrite(async (tx) => {
+        // --- Batch Functions ---
+        if (fileData.functions.length > 0) {
+          // Fix 49: Don't mutate input - create shallow copies with default cyclomatic_complexity
+          const funcProps = fileData.functions.map(f => {
+            const copy = { ...f, path: filePath };
+            if (!('cyclomatic_complexity' in copy) || copy.cyclomatic_complexity === undefined) {
+              copy.cyclomatic_complexity = 1;
+            }
+            return filterProps(copy, 'Function');
+          });
+          await tx.run(
             `MATCH (f:File {path: $path})
-             MERGE (n:${label} {name: $name, path: $path, line_number: $line_number})
-             SET n += $props
+             UNWIND $items AS item
+             MERGE (n:Function {name: item.name, path: $path, line_number: item.line_number})
+             SET n += item
              MERGE (f)-[:CONTAINS]->(n)`,
-            {
-              path: filePath,
-              name: item.name,
-              line_number: item.line_number,
-              props: item,
-            }
+            { path: filePath, items: funcProps }
           );
+        }
 
-          // Parameters for functions -- CGC graph_builder.py:358-364
-          if (label === 'Function') {
-            const fn = item as unknown as ParsedFunction;
-            for (const argName of fn.args) {
-              await session.run(
-                `MATCH (fn:Function {name: $func_name, path: $path, line_number: $line_number})
-                 MERGE (p:Parameter {name: $arg_name, path: $path, function_line_number: $line_number})
-                 MERGE (fn)-[:HAS_PARAMETER]->(p)`,
-                {
-                  func_name: fn.name,
-                  path: filePath,
-                  line_number: fn.line_number,
-                  arg_name: argName,
-                }
-              );
-            }
+        // --- Batch Classes ---
+        if (fileData.classes.length > 0) {
+          const classProps = fileData.classes.map(c =>
+            filterProps({ ...c, path: filePath }, 'Class')
+          );
+          await tx.run(
+            `MATCH (f:File {path: $path})
+             UNWIND $items AS item
+             MERGE (n:Class {name: item.name, path: $path, line_number: item.line_number})
+             SET n += item
+             MERGE (f)-[:CONTAINS]->(n)`,
+            { path: filePath, items: classProps }
+          );
+        }
+
+        // --- Batch Variables ---
+        if (fileData.variables.length > 0) {
+          const varProps = fileData.variables.map(v =>
+            filterProps({ ...v, path: filePath }, 'Variable')
+          );
+          await tx.run(
+            `MATCH (f:File {path: $path})
+             UNWIND $items AS item
+             MERGE (n:Variable {name: item.name, path: $path, line_number: item.line_number})
+             SET n += item
+             MERGE (f)-[:CONTAINS]->(n)`,
+            { path: filePath, items: varProps }
+          );
+        }
+
+        // --- Batch Interfaces ---
+        const interfaces = fileData.interfaces || [];
+        if (interfaces.length > 0) {
+          const ifaceProps = interfaces.map(i =>
+            filterProps({ ...i, path: filePath }, 'Interface')
+          );
+          await tx.run(
+            `MATCH (f:File {path: $path})
+             UNWIND $items AS item
+             MERGE (n:Interface {name: item.name, path: $path, line_number: item.line_number})
+             SET n += item
+             MERGE (f)-[:CONTAINS]->(n)`,
+            { path: filePath, items: ifaceProps }
+          );
+        }
+
+        // --- Batch Parameters ---
+        const paramRows: { func_name: string; line_number: number; arg_name: string }[] = [];
+        for (const fn of fileData.functions) {
+          for (const argName of fn.args) {
+            paramRows.push({ func_name: fn.name, line_number: fn.line_number, arg_name: argName });
           }
         }
-      }
+        if (paramRows.length > 0) {
+          await tx.run(
+            `UNWIND $params AS p
+             MATCH (fn:Function {name: p.func_name, path: $path, line_number: p.line_number})
+             MERGE (param:Parameter {name: p.arg_name, path: $path, function_line_number: p.line_number})
+             MERGE (fn)-[:HAS_PARAMETER]->(param)`,
+            { path: filePath, params: paramRows }
+          );
+        }
 
-      // Nested functions -- CGC graph_builder.py:374-381
-      for (const func of fileData.functions) {
-        if (func.context_type === 'function_definition' && func.context) {
-          await session.run(
-            `MATCH (outer:Function {name: $context, path: $path})
-             MATCH (inner:Function {name: $name, path: $path, line_number: $line_number})
+        // --- Batch Nested Function CONTAINS ---
+        // Fix 1: Use JS/TS node types instead of Python's function_definition
+        const nestedFunctionTypes = new Set([
+          'function_declaration', 'function_expression', 'arrow_function', 'method_definition',
+        ]);
+        const nestedRows = fileData.functions
+          .filter(f => f.context_type && nestedFunctionTypes.has(f.context_type) && f.context)
+          .map(f => ({ context: f.context, name: f.name, line_number: f.line_number }));
+        if (nestedRows.length > 0) {
+          await tx.run(
+            `UNWIND $rows AS r
+             MATCH (outer:Function {name: r.context, path: $path})
+             MATCH (inner:Function {name: r.name, path: $path, line_number: r.line_number})
              MERGE (outer)-[:CONTAINS]->(inner)`,
-            { context: func.context, path: filePath, name: func.name, line_number: func.line_number }
+            { path: filePath, rows: nestedRows }
           );
         }
-      }
 
-      // Class methods -- CGC graph_builder.py:428-439
-      for (const func of fileData.functions) {
-        if (func.class_context) {
-          await session.run(
-            `MATCH (c:Class {name: $class_name, path: $path})
-             MATCH (fn:Function {name: $func_name, path: $path, line_number: $func_line})
+        // --- Batch Class Method CONTAINS ---
+        const methodRows = fileData.functions
+          .filter(f => f.class_context)
+          .map(f => ({ class_name: f.class_context, func_name: f.name, func_line: f.line_number }));
+        if (methodRows.length > 0) {
+          await tx.run(
+            `UNWIND $rows AS r
+             MATCH (c:Class {name: r.class_name, path: $path})
+             MATCH (fn:Function {name: r.func_name, path: $path, line_number: r.func_line})
              MERGE (c)-[:CONTAINS]->(fn)`,
-            {
-              class_name: func.class_context,
-              path: filePath,
-              func_name: func.name,
-              func_line: func.line_number,
-            }
+            { path: filePath, rows: methodRows }
           );
         }
-      }
 
-      // Imports -- CGC graph_builder.py:383-425
-      // For JS/TS: use source as module name, set imported_name, alias, line_number as rel props
-      for (const imp of fileData.imports) {
-        const moduleName = imp.source;
-        if (!moduleName) continue;
-
-        const relProps: Record<string, unknown> = { imported_name: imp.name };
-        if (imp.alias) relProps.alias = imp.alias;
-        if (imp.line_number) relProps.line_number = imp.line_number;
-
-        await session.run(
-          `MATCH (f:File {path: $path})
-           MERGE (m:Module {name: $module_name})
-           MERGE (f)-[r:IMPORTS]->(m)
-           SET r += $props`,
-          { path: filePath, module_name: moduleName, props: relProps }
-        );
-      }
+        // --- Batch Imports ---
+        const importRows = fileData.imports
+          .filter(imp => imp.source)
+          .map(imp => {
+            const row: Record<string, unknown> = {
+              module_name: imp.source,
+              imported_name: imp.name,
+            };
+            if (imp.alias) row.alias = imp.alias;
+            if (imp.line_number) row.line_number = imp.line_number;
+            return row;
+          });
+        if (importRows.length > 0) {
+          await tx.run(
+            `MATCH (f:File {path: $path})
+             UNWIND $imports AS imp
+             MERGE (m:Module {name: imp.module_name})
+             MERGE (f)-[r:IMPORTS]->(m)
+             SET r.imported_name = imp.imported_name,
+                 r.alias = imp.alias,
+                 r.line_number = imp.line_number`,
+            { path: filePath, imports: importRows }
+          );
+        }
+      });
     } finally {
       await session.close();
     }
   }
 
-  // --- CALLS Relationships ------------------------------------
+  // --- Batch CALLS Relationships --------------------------------
+
+  /**
+   * Create CALLS relationships in batch using UNWIND.
+   * Fix 6: Replaces per-call createCallRelationship / createFileLevelCallRelationship.
+   */
+  async createCallRelationshipsBatch(calls: ResolvedCall[]): Promise<void> {
+    if (calls.length === 0) return;
+
+    // Split into function-level and file-level calls
+    const funcCalls = calls.filter(c => c.caller_name !== '');
+    const fileCalls = calls.filter(c => c.caller_name === '');
+
+    const session = this.getSession();
+    try {
+      await session.executeWrite(async (tx) => {
+        if (funcCalls.length > 0) {
+          await tx.run(
+            `UNWIND $calls AS c
+             MATCH (caller) WHERE (caller:Function OR caller:Class)
+               AND caller.name = c.caller_name
+               AND caller.path = c.caller_file_path
+               AND caller.line_number = c.caller_line_number
+             MATCH (called) WHERE (called:Function OR called:Class)
+               AND called.name = c.called_name
+               AND called.path = c.called_file_path
+             WITH caller, called, c
+             OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
+             WHERE called:Class AND init.name IN ["__init__", "constructor"]
+             WITH caller, COALESCE(init, called) AS final_target, c
+             MERGE (caller)-[:CALLS {line_number: c.line_number, args: c.args, full_call_name: c.full_call_name}]->(final_target)`,
+            { calls: funcCalls }
+          );
+        }
+
+        if (fileCalls.length > 0) {
+          await tx.run(
+            `UNWIND $calls AS c
+             MATCH (caller:File {path: c.caller_file_path})
+             MATCH (called) WHERE (called:Function OR called:Class)
+               AND called.name = c.called_name
+               AND called.path = c.called_file_path
+             WITH caller, called, c
+             OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
+             WHERE called:Class AND init.name IN ["__init__", "constructor"]
+             WITH caller, COALESCE(init, called) AS final_target, c
+             MERGE (caller)-[:CALLS {line_number: c.line_number, args: c.args, full_call_name: c.full_call_name}]->(final_target)`,
+            { calls: fileCalls }
+          );
+        }
+      });
+    } finally {
+      await session.close();
+    }
+  }
 
   /**
    * Create a single CALLS relationship when caller context is known (function/class caller).
    * CGC graph_builder.py:577-600
+   * Kept for backward compatibility; prefer createCallRelationshipsBatch.
    */
   async createCallRelationship(
     callerName: string,
@@ -270,35 +410,22 @@ export class GraphClient {
     args: string[],
     fullCallName: string,
   ): Promise<void> {
-    await this.runCypher(
-      `MATCH (caller) WHERE (caller:Function OR caller:Class)
-         AND caller.name = $caller_name
-         AND caller.path = $caller_file_path
-         AND caller.line_number = $caller_line_number
-       MATCH (called) WHERE (called:Function OR called:Class)
-         AND called.name = $called_name
-         AND called.path = $called_file_path
-       WITH caller, called
-       OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-       WHERE called:Class AND init.name IN ["__init__", "constructor"]
-       WITH caller, COALESCE(init, called) as final_target
-       MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(final_target)`,
-      {
-        caller_name: callerName,
-        caller_file_path: callerFilePath,
-        caller_line_number: callerLineNumber,
-        called_name: calledName,
-        called_file_path: calledFilePath,
-        line_number: lineNumber,
-        args,
-        full_call_name: fullCallName,
-      }
-    );
+    await this.createCallRelationshipsBatch([{
+      caller_name: callerName,
+      caller_file_path: callerFilePath,
+      caller_line_number: callerLineNumber,
+      called_name: calledName,
+      called_file_path: calledFilePath,
+      line_number: lineNumber,
+      args,
+      full_call_name: fullCallName,
+    }]);
   }
 
   /**
    * Create CALLS from file-level (no caller context).
    * CGC graph_builder.py:602-620
+   * Kept for backward compatibility; prefer createCallRelationshipsBatch.
    */
   async createFileLevelCallRelationship(
     callerFilePath: string,
@@ -308,28 +435,35 @@ export class GraphClient {
     args: string[],
     fullCallName: string,
   ): Promise<void> {
-    await this.runCypher(
-      `MATCH (caller:File {path: $caller_file_path})
-       MATCH (called) WHERE (called:Function OR called:Class)
-         AND called.name = $called_name
-         AND called.path = $called_file_path
-       WITH caller, called
-       OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-       WHERE called:Class AND init.name IN ["__init__", "constructor"]
-       WITH caller, COALESCE(init, called) as final_target
-       MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(final_target)`,
-      {
-        caller_file_path: callerFilePath,
-        called_name: calledName,
-        called_file_path: calledFilePath,
-        line_number: lineNumber,
-        args,
-        full_call_name: fullCallName,
-      }
-    );
+    await this.createCallRelationshipsBatch([{
+      caller_name: '',
+      caller_file_path: callerFilePath,
+      caller_line_number: 0,
+      called_name: calledName,
+      called_file_path: calledFilePath,
+      line_number: lineNumber,
+      args,
+      full_call_name: fullCallName,
+    }]);
   }
 
-  // --- INHERITS Relationships ---------------------------------
+  // --- Batch INHERITS Relationships -----------------------------
+
+  /**
+   * Create INHERITS relationships in batch using UNWIND.
+   * Fix 6: Replaces per-call createInheritsRelationship.
+   */
+  async createInheritsRelationshipsBatch(inheritance: ResolvedInheritance[]): Promise<void> {
+    if (inheritance.length === 0) return;
+
+    await this.runCypher(
+      `UNWIND $items AS i
+       MATCH (child:Class {name: i.child_name, path: i.child_file_path})
+       MATCH (parent:Class {name: i.parent_name, path: i.parent_file_path})
+       MERGE (child)-[:INHERITS]->(parent)`,
+      { items: inheritance }
+    );
+  }
 
   /** CGC graph_builder.py:682-690 */
   async createInheritsRelationship(
@@ -338,17 +472,12 @@ export class GraphClient {
     parentName: string,
     parentFilePath: string,
   ): Promise<void> {
-    await this.runCypher(
-      `MATCH (child:Class {name: $child_name, path: $child_path})
-       MATCH (parent:Class {name: $parent_name, path: $parent_path})
-       MERGE (child)-[:INHERITS]->(parent)`,
-      {
-        child_name: childName,
-        child_path: childFilePath,
-        parent_name: parentName,
-        parent_path: parentFilePath,
-      }
-    );
+    await this.createInheritsRelationshipsBatch([{
+      child_name: childName,
+      child_file_path: childFilePath,
+      parent_name: parentName,
+      parent_file_path: parentFilePath,
+    }]);
   }
 
   // --- Symbol Map Bootstrap -----------------------------------

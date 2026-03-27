@@ -20,7 +20,7 @@ export interface PipelineProgress {
 }
 
 /**
- * Process a batch of file paths through the parse → graph → resolve pipeline.
+ * Process a batch of file paths through the parse -> graph -> resolve pipeline.
  * Shared by both the watcher (on file change) and the indexer (full scan).
  */
 export async function processFiles(
@@ -65,30 +65,15 @@ export async function processFiles(
     }
   }
 
-  // Phase 3: Resolve cross-file relationships
+  // Phase 3: Resolve cross-file relationships (batched per file)
   for (const parsed of parsedFiles) {
     const calls = resolveCallsForFile(parsed, symbolMap, options.skipExternal);
-    for (const call of calls) {
-      if (call.caller_name === '') {
-        await graph.createFileLevelCallRelationship(
-          call.caller_file_path, call.called_name, call.called_file_path,
-          call.line_number, call.args, call.full_call_name,
-        );
-      } else {
-        await graph.createCallRelationship(
-          call.caller_name, call.caller_file_path, call.caller_line_number,
-          call.called_name, call.called_file_path,
-          call.line_number, call.args, call.full_call_name,
-        );
-      }
-    }
+    // Fix 6: Batch all CALLS for this file into one UNWIND query
+    await graph.createCallRelationshipsBatch(calls);
 
     const inheritance = resolveInheritanceForFile(parsed, symbolMap);
-    for (const inh of inheritance) {
-      await graph.createInheritsRelationship(
-        inh.child_name, inh.child_file_path, inh.parent_name, inh.parent_file_path,
-      );
-    }
+    // Fix 6: Batch all INHERITS for this file into one UNWIND query
+    await graph.createInheritsRelationshipsBatch(inheritance);
 
     await graph.cleanStaleCallsTo(parsed.path);
   }
