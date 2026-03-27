@@ -1,5 +1,14 @@
-import type { ParsedFile, ResolvedCall, ResolvedInheritance } from './types.js';
+import type { ParsedFile, ParsedImport, ResolvedCall, ResolvedInheritance } from './types.js';
 import type { SymbolMap } from './symbols.js';
+
+function buildImportMap(imports: ParsedImport[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const imp of imports) {
+    const key = imp.alias || imp.name.split('.').pop()!;
+    map[key] = imp.source;
+  }
+  return map;
+}
 
 /**
  * Resolve CALLS for a single file.
@@ -21,11 +30,7 @@ export function resolveCallsForFile(
     ...file.functions.map(f => f.name),
     ...file.classes.map(c => c.name),
   ]);
-  const localImports: Record<string, string> = {};
-  for (const imp of file.imports) {
-    const key = imp.alias || imp.name.split('.').pop()!;
-    localImports[key] = imp.source;
-  }
+  const localImports = buildImportMap(file.imports);
 
   const resolved: ResolvedCall[] = [];
 
@@ -78,9 +83,9 @@ export function resolveCallsForFile(
         const candidates = symbolMap.resolve(calledName);
         if (candidates.length > 0) {
           resolvedPath = candidates[0];
-        } else {
-          resolvedPath = callerFilePath; // last resort: same file
         }
+        // If still unresolved, skip this call (don't self-reference)
+        if (!resolvedPath) continue;
       }
     }
 
@@ -128,11 +133,7 @@ export function resolveInheritanceForFile(
 ): ResolvedInheritance[] {
   const callerFilePath = file.path;
   const localClassNames = new Set(file.classes.map(c => c.name));
-  const localImports: Record<string, string> = {};
-  for (const imp of file.imports) {
-    const key = imp.alias || imp.name.split('.').pop()!;
-    localImports[key] = imp.source;
-  }
+  const localImports = buildImportMap(file.imports);
 
   const resolved: ResolvedInheritance[] = [];
 

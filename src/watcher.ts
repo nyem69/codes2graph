@@ -64,18 +64,19 @@ export class BatchDebouncer {
 
 // ─── Watcher ───────────────────────────────────────────
 
-const SUPPORTED_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
-
 export class Watcher {
   private fsWatcher: FSWatcher | null = null;
   private debouncer: BatchDebouncer | null = null;
+  private supportedExtensions: Set<string>;
 
   constructor(
     private graph: GraphClient,
     private parser: Parser,
     private symbolMap: SymbolMap,
     private options: WatchOptions,
-  ) {}
+  ) {
+    this.supportedExtensions = new Set(this.options.extensions);
+  }
 
   async start(repoPath: string): Promise<void> {
     const absRepoPath = resolve(repoPath);
@@ -101,23 +102,29 @@ export class Watcher {
         return false;
       },
       usePolling: true,
-      interval: 2000,
+      interval: 5000,
       binaryInterval: 5000,
       persistent: true,
       ignoreInitial: true,
     });
 
     this.fsWatcher
-      .on('add', (p) => this.onFileEvent(absRepoPath, p, ignorePatterns))
-      .on('change', (p) => this.onFileEvent(absRepoPath, p, ignorePatterns))
-      .on('unlink', (p) => this.onFileEvent(absRepoPath, p, ignorePatterns))
+      .on('add', (p) => this.onFileEvent(absRepoPath, p))
+      .on('change', (p) => this.onFileEvent(absRepoPath, p))
+      .on('unlink', (p) => this.onFileEvent(absRepoPath, p))
       .on('ready', () => console.log(`Watching ${absRepoPath} for changes (polling mode)...`))
-      .on('error', (err) => console.error('Watcher error:', err));
+      .on('error', (err: NodeJS.ErrnoException) => {
+        console.error('Watcher error:', err);
+        if (err.code === 'EMFILE' || err.code === 'EACCES' || err.code === 'EPERM') {
+          console.error('Fatal watcher error, exiting.');
+          process.exit(1);
+        }
+      });
   }
 
-  private onFileEvent(repoPath: string, filePath: string, _ignorePatterns: string[]): void {
+  private onFileEvent(repoPath: string, filePath: string): void {
     const absPath = resolve(filePath);
-    if (!SUPPORTED_EXTENSIONS.has(extname(absPath))) return;
+    if (!this.supportedExtensions.has(extname(absPath))) return;
     this.debouncer!.add(absPath);
   }
 
