@@ -4,61 +4,80 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**codes2graph** is an incremental file watcher that keeps a CodeGraphContext (CGC)-compatible Neo4j graph up-to-date as code is edited. It replaces CGC's broken `cgc watch` (O(n²-n³) on every save) with per-file incremental updates targeting <2s per change.
+**codes2graph** indexes codebases into a Neo4j graph and keeps them up-to-date incrementally as code is edited. It replaces both `cgc index` (full indexing) and `cgc watch` (file watching) with faster, `.cgcignore`-aware alternatives.
 
 It writes to the **same Neo4j database and schema** that CGC uses — all existing CGC MCP tools (`find_code`, `find_callers`, `find_dead_code`) continue working unchanged. codes2graph only writes; CGC's MCP server remains the read interface.
 
 ## Architecture
 
 ```
-Claude Code ←──MCP──► cgc mcp start ←──read──► Neo4j ◄──incremental write── codes2graph (watcher)
+codes2graph index ──► Neo4j ◄── cgc mcp start ←──MCP──► Claude Code
+codes2graph watch ──►
 ```
 
 The architecture spec is in `docs/001-Architecture.md` — it is the authoritative reference for schema, algorithms, and implementation plan.
 
-### Core Algorithm
+### Three Commands
 
-On file change: parse only that file (tree-sitter) → delete old graph nodes for that file → create new nodes/relationships → resolve CALLS/INHERITS using incremental symbol map. The symbol map is the key innovation: maintained incrementally per-file instead of CGC's full-rebuild approach.
+- **`index <path>`** — Full index: discover files (respecting `.cgcignore`), parse with tree-sitter, write graph, resolve cross-file CALLS/INHERITS. `--force` wipes existing data first.
+- **`watch <path>`** — Incremental: on file change, debounce (5s quiet / 30s max), then delete old nodes → re-parse → write new nodes → re-resolve relationships.
+- **`clean <path>`** — Remove `.cgcignore`-matched files from graph (only needed after `cgc index`, not after codes2graph `index`).
 
-### Planned Source Layout
+### Core Pipeline (src/pipeline.ts)
+
+Both `index` and `watch` share the same pipeline: for a batch of file paths → clean old data → parse each file (tree-sitter) → write to Neo4j → resolve CALLS/INHERITS using incremental symbol map. The symbol map (`symbolName → Set<filePath>`) is maintained incrementally per-file.
+
+### Source Layout
 
 ```
 src/
-├── index.ts       # CLI entry point
-├── watcher.ts     # chokidar file watcher + debounce (5s quiet, 30s max)
-├── parser.ts      # tree-sitter parsing for TS/JS
+├── index.ts       # CLI entry point (index, watch, clean commands)
+├── indexer.ts     # Full repo indexer (file discovery + batch orchestration)
+├── watcher.ts     # chokidar file watcher + BatchDebouncer
+├── pipeline.ts    # Shared parse → graph → resolve pipeline
+├── parser.ts      # tree-sitter parsing for TS/JS/TSX/JSX
 ├── graph.ts       # Neo4j CRUD (must match CGC schema exactly)
-├── symbols.ts     # Incremental global symbol map (symbolName → filePaths)
+├── symbols.ts     # Incremental global symbol map
 ├── resolver.ts    # CALLS/INHERITS resolution (local → import → global)
-└── ignore.ts      # .cgcignore parser
+├── ignore.ts      # .cgcignore parser (merged with built-in defaults)
+├── config.ts      # .env config loading
+└── types.ts       # Shared TypeScript interfaces
 ```
 
 ## Tech Stack
 
 - **Runtime**: Node.js + TypeScript
-- **File watcher**: chokidar
-- **Parser**: tree-sitter (web-tree-sitter or node-tree-sitter)
+- **File watcher**: chokidar (polling mode for launchd compatibility)
+- **Parser**: web-tree-sitter
 - **Database**: neo4j-driver (official)
-- **Ignore**: picomatch / .cgcignore format
+- **Ignore**: picomatch / .cgcignore format (always merged with built-in defaults)
 - **Config**: dotenv (`~/.codegraphcontext/.env` for Neo4j credentials)
+- **Tests**: vitest
 
 ## Neo4j Schema (CGC-Compatible)
 
-Node labels: `Repository`, `File`, `Directory`, `Function`, `Class`, `Variable`, `Module`, `Parameter`
+Node labels: `Repository`, `File`, `Directory`, `Function`, `Class`, `Variable`, `Module`, `Parameter`, `Interface`
 Relationships: `CONTAINS`, `CALLS` (with line_number, args), `IMPORTS` (with alias), `INHERITS`, `HAS_PARAMETER`
 
 File nodes are keyed by `path`. Function/Class/Variable use composite `(name, path, line_number)`. See `docs/001-Architecture.md` for full schema details and Cypher constraints.
 
-## Implementation Phases
+## SvelteKit Handler Parsing
 
-1. **Phase 1**: Core incremental updater (TS/JS only) — graph.ts → parser.ts → symbols.ts → resolver.ts → watcher.ts → index.ts
-2. **Phase 2**: Svelte support (extract `<script>` blocks, adjust line numbers)
-3. **Phase 3**: Reverse CALLS staleness cleanup (delete all outgoing CALLS before re-creating)
-4. **Phase 4**: Launchd/systemd background service
+codes2graph correctly parses `export const POST: RequestHandler = async () => {}` as a named Function node (not a Variable). The tree-sitter query matches `variable_declarator → arrow_function` patterns. Calls inside these handlers get proper caller context, producing Function→Function CALLS edges.
+
+This is an improvement over `cgc index`, which creates file-level CALLS edges for these patterns, causing false positives in `find_dead_code` and broken `call_chain` traversal.
+
+## Ignore Patterns
+
+`.cgcignore` patterns are always **merged** with built-in defaults (node_modules, .svelte-kit, dist, build, .wrangler, .git, .claude, *.min.js, *.map). A project's `.cgcignore` adds to these defaults, never replaces them.
+
+## Running as a Service
+
+Watchers run as macOS launchd services. See `docs/002-Launchd-Deployment.md` for plist templates, the EMFILE fix (polling mode + ulimit), and troubleshooting. Key detail: services use compiled `dist/index.js` (run `npm run build` first), not tsx.
 
 ## Critical Constraints
 
 - Graph writes must produce **identical schema** to `cgc index` output — CGC MCP tools must read the data without modification
 - Symbol resolution priority must match CGC: local context → local definition → import map → global symbol map
 - Debounce: 5s quiet period, 30s max wait, batch all changes into single processing pass
-- Phase 1 targets: single file <2s, 10-file batch <5s, idle memory <50MB, idle CPU <1%
+- `--force` wipe must clean stale sub-repo Repository nodes (left by cgc index on subdirectories)
