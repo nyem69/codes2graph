@@ -31,7 +31,34 @@ Standard code search tools (grep, ripgrep, IDE find-references) work on text pat
 
 **Known limitation:** SvelteKit anonymous route handlers (`export const POST = async () => {}`) are correctly parsed by codes2graph as named functions. However, if a repo was indexed with `cgc index` (the Python tool), these show up as file-level calls, causing false positives in dead code detection and broken call chain traversal. Re-indexing with codes2graph fixes this.
 
-<!-- TODO: Add real comparison test results with actual numbers from indexed repos -->
+### Real-world comparison (plusdrive, 1,314 files, 2,846 functions)
+
+**Find callers of `autoResolveProjectLrs`:**
+- Grep: 10 files match (includes definition, imports, type references, comments)
+- Graph: 4 exact callers with line numbers -- `POST` in `+server.ts:327`, `POST` in `bulk-resolve/+server.ts:107`, etc.
+
+**Find callees (downstream calls):**
+- Grep: not practical without reading the function body and parsing every call expression
+- Graph: 13 callees in one query -- `sampleTrackPoints`, `findNearestSegments`, `detectSegments`, `buildConsensus`, `deriveProjectSummary`, `precomputeProjectLrs`, etc. with exact line numbers
+
+**Complexity hotspots:**
+- Grep: manual count of `if`/`for`/`while` -- typically ~3x underestimate
+- Graph: AST-based, top functions across all repos in one query:
+
+  | CC | Function | File |
+  |----|----------|------|
+  | 350 | `layoutSun` | nasab/wall-chart-sun-layout.ts |
+  | 189 | `POST` | plusdrive/api/projects/[id]/assets/+server.ts |
+  | 171 | `getProgressDashboard` | plusdrive/job-list.service.ts |
+  | 116 | `vincentyDistance` | plusdrive/geodesic.ts |
+
+**Dead code detection:**
+- Grep: search for each exported function, manually verify -- hours of work
+- Graph: 1,180 of 2,846 functions have no incoming CALLS (41%) -- instant query, then filter for false positives (route handlers, entry points)
+
+**Module coupling (LRS module):**
+- Grep: `grep -r "from.*lrs"` + manual dedup
+- Graph: 24 files import from `/lrs/`, 17 outbound dependencies -- structured, instant
 
 ## Quick Start
 
