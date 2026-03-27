@@ -2,8 +2,10 @@
 // See CGC: tools/languages/typescript.py and tools/languages/javascript.py
 
 import TreeSitter from 'web-tree-sitter';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
 import { resolve, extname } from 'path';
+
+const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
 import type {
   ParsedFile, ParsedFunction, ParsedClass, ParsedVariable,
   ParsedImport, ParsedCall, ParsedInterface, ParsedTypeAlias,
@@ -119,6 +121,7 @@ type SyntaxNode = TreeSitter.SyntaxNode;
 export class Parser {
   private tsParser!: TreeSitter;
   private languages: Map<string, TreeSitter.Language> = new Map();
+  private compiledQueries = new Map<string, Record<string, TreeSitter.Query>>();
   private initialized = false;
 
   async init(): Promise<void> {
@@ -158,6 +161,24 @@ export class Parser {
         // Language WASM not available — will be skipped
       }
     }
+
+    // Pre-compile tree-sitter queries per language to avoid repeated compilation
+    for (const [name, lang] of this.languages) {
+      const qs = queriesForLang(name);
+      const isTs = name === 'typescript' || name === 'tsx';
+      const compiled: Record<string, TreeSitter.Query> = {
+        functions: lang.query(qs.functions),
+        classes: lang.query(qs.classes),
+        imports: lang.query(qs.imports),
+        calls: lang.query(qs.calls),
+        variables: lang.query(qs.variables),
+      };
+      if (isTs) {
+        compiled.interfaces = lang.query(TS_QUERIES.interfaces);
+        compiled.type_aliases = lang.query(TS_QUERIES.type_aliases);
+      }
+      this.compiledQueries.set(name, compiled);
+    }
   }
 
   /** Get the language name for a file extension. */
@@ -179,6 +200,21 @@ export class Parser {
     const ext = extname(absPath);
     const langName = this.getLangName(ext);
     if (!langName) throw new Error(`Unsupported extension: ${ext}`);
+
+    const stat = statSync(absPath);
+    if (stat.size > MAX_FILE_SIZE) {
+      console.warn(`Skipping ${absPath}: file too large (${(stat.size / 1024 / 1024).toFixed(1)}MB > 2MB limit)`);
+      return {
+        path: absPath,
+        lang: langName === 'tsx' ? 'typescript' : langName,
+        functions: [],
+        classes: [],
+        variables: [],
+        imports: [],
+        function_calls: [],
+        is_dependency: false,
+      };
+    }
 
     const source = readFileSync(absPath, 'utf-8');
     return this.parseSource(absPath, langName, source, indexSource);
@@ -203,7 +239,7 @@ export class Parser {
     const isTs = langName === 'typescript' || langName === 'tsx';
     const lang = langName === 'tsx' ? 'typescript' : langName;
 
-    return {
+    const result: ParsedFile = {
       path: filePath,
       lang,
       functions: this.findFunctions(root, language, langName, indexSource),
@@ -211,10 +247,15 @@ export class Parser {
       variables: this.findVariables(root, language, langName),
       imports: this.findImports(root, language, langName),
       function_calls: this.findCalls(root, language, langName),
-      interfaces: isTs ? this.findInterfaces(root, language, indexSource) : undefined,
-      type_aliases: isTs ? this.findTypeAliases(root, language, indexSource) : undefined,
+      interfaces: isTs ? this.findInterfaces(root, language, langName, indexSource) : undefined,
+      type_aliases: isTs ? this.findTypeAliases(root, language, langName, indexSource) : undefined,
       is_dependency: false,
     };
+
+    // Free WASM tree memory to prevent leaks
+    tree.delete();
+
+    return result;
   }
 
   // ─── Helper methods (match CGC's Python methods) ─────────────────────
@@ -230,8 +271,8 @@ export class Parser {
   private getParentContext(
     node: SyntaxNode,
     types = [
-      'function_declaration', 'class_declaration', 'method_definition',
-      'function_expression', 'arrow_function',
+      'function_declaration', 'class_declaration', 'abstract_class_declaration',
+      'method_definition', 'function_expression', 'arrow_function',
     ],
   ): [string | null, string | null, number | null] {
     let curr = node.parent;
@@ -367,8 +408,8 @@ export class Parser {
     langName: string,
     indexSource: boolean,
   ): ParsedFunction[] {
-    const queries = queriesForLang(langName);
-    const query = language.query(queries.functions);
+    const cached = this.compiledQueries.get(langName);
+    const query = cached ? cached.functions : language.query(queriesForLang(langName).functions);
     const matches = query.matches(root);
 
     type FuncKey = string;
@@ -427,7 +468,7 @@ export class Parser {
       }
 
       const [context, contextType] = this.getParentContext(data.node);
-      const classContext = contextType === 'class_declaration' ? context : null;
+      const classContext = (contextType === 'class_declaration' || contextType === 'abstract_class_declaration') ? context : null;
 
       const func: ParsedFunction = {
         name,
@@ -462,8 +503,8 @@ export class Parser {
     langName: string,
     indexSource: boolean,
   ): ParsedClass[] {
-    const queries = queriesForLang(langName);
-    const query = language.query(queries.classes);
+    const cached = this.compiledQueries.get(langName);
+    const query = cached ? cached.classes : language.query(queriesForLang(langName).classes);
     const matches = query.matches(root);
     const classes: ParsedClass[] = [];
     const lang = langName === 'tsx' ? 'typescript' : langName;
@@ -519,9 +560,11 @@ export class Parser {
   private findInterfaces(
     root: SyntaxNode,
     language: TreeSitter.Language,
+    langName: string,
     indexSource: boolean,
   ): ParsedInterface[] {
-    const query = language.query(TS_QUERIES.interfaces);
+    const cached = this.compiledQueries.get(langName);
+    const query = cached?.interfaces ?? language.query(TS_QUERIES.interfaces);
     const interfaces: ParsedInterface[] = [];
 
     for (const match of query.matches(root)) {
@@ -549,9 +592,11 @@ export class Parser {
   private findTypeAliases(
     root: SyntaxNode,
     language: TreeSitter.Language,
+    langName: string,
     indexSource: boolean,
   ): ParsedTypeAlias[] {
-    const query = language.query(TS_QUERIES.type_aliases);
+    const cached = this.compiledQueries.get(langName);
+    const query = cached?.type_aliases ?? language.query(TS_QUERIES.type_aliases);
     const aliases: ParsedTypeAlias[] = [];
 
     for (const match of query.matches(root)) {
@@ -581,8 +626,8 @@ export class Parser {
     language: TreeSitter.Language,
     langName: string,
   ): ParsedImport[] {
-    const queries = queriesForLang(langName);
-    const query = language.query(queries.imports);
+    const cached = this.compiledQueries.get(langName);
+    const query = cached ? cached.imports : language.query(queriesForLang(langName).imports);
     const imports: ParsedImport[] = [];
     const lang = langName === 'tsx' ? 'typescript' : langName;
 
@@ -683,8 +728,8 @@ export class Parser {
     language: TreeSitter.Language,
     langName: string,
   ): ParsedCall[] {
-    const queries = queriesForLang(langName);
-    const query = language.query(queries.calls);
+    const cached = this.compiledQueries.get(langName);
+    const query = cached ? cached.calls : language.query(queriesForLang(langName).calls);
     const calls: ParsedCall[] = [];
     const lang = langName === 'tsx' ? 'typescript' : langName;
 
@@ -749,8 +794,8 @@ export class Parser {
     language: TreeSitter.Language,
     langName: string,
   ): ParsedVariable[] {
-    const queries = queriesForLang(langName);
-    const query = language.query(queries.variables);
+    const cached = this.compiledQueries.get(langName);
+    const query = cached ? cached.variables : language.query(queriesForLang(langName).variables);
     const variables: ParsedVariable[] = [];
     const lang = langName === 'tsx' ? 'typescript' : langName;
 
@@ -781,7 +826,7 @@ export class Parser {
         }
 
         const [context, contextType] = this.getParentContext(node);
-        const classContext = contextType === 'class_declaration' ? context : null;
+        const classContext = (contextType === 'class_declaration' || contextType === 'abstract_class_declaration') ? context : null;
 
         variables.push({
           name,
@@ -805,6 +850,8 @@ export class Parser {
    * CGC typescript.py:502-577 pre_scan_typescript
    */
   preScanFile(filePath: string, source: string, langName: string): string[] {
+    if (!this.initialized) throw new Error('Parser not initialized. Call init() first.');
+
     const language = this.languages.get(langName);
     if (!language) return [];
 
@@ -851,6 +898,9 @@ export class Parser {
         // Query may not be valid for this language variant
       }
     }
+
+    // Free WASM tree memory to prevent leaks
+    tree.delete();
 
     return names;
   }
