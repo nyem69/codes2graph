@@ -17,6 +17,7 @@ function printUsage() {
   console.log('  index <path>        Full index of a repo into Neo4j');
   console.log('  watch <path>        Watch repo for changes and update graph');
   console.log('  clean <path>        Remove ignored files from Neo4j graph');
+  console.log('  stats               Show graph statistics grouped by repo');
   console.log('');
   console.log('Index options:');
   console.log('  --force             Wipe existing graph data for this repo first');
@@ -276,6 +277,111 @@ async function watch(repoPath: string, args: string[]) {
   await watcher.start(repoPath);
 }
 
+async function stats() {
+  const config = loadConfig();
+  const graph = new GraphClient(config);
+
+  try {
+    await graph.connect();
+  } catch {
+    console.error(`Error: Could not connect to Neo4j at ${config.neo4jUri}`);
+    process.exit(1);
+  }
+
+  try {
+    // Per-repo stats
+    const repos = await graph.runCypher(`
+      MATCH (r:Repository)
+      OPTIONAL MATCH (r)-[:CONTAINS*]->(f:File)
+      WITH r.name AS repo, r.path AS path, count(DISTINCT f) AS files
+      ORDER BY files DESC
+      RETURN repo, path, files
+    `);
+
+    // Per-repo function/class/variable/interface counts
+    const perRepo = await graph.runCypher(`
+      MATCH (r:Repository)
+      OPTIONAL MATCH (fn:Function) WHERE fn.path STARTS WITH r.path
+      WITH r.name AS repo, r.path AS path, count(DISTINCT fn) AS functions
+      OPTIONAL MATCH (c:Class) WHERE c.path STARTS WITH path
+      WITH repo, path, functions, count(DISTINCT c) AS classes
+      OPTIONAL MATCH (v:Variable) WHERE v.path STARTS WITH path
+      WITH repo, path, functions, classes, count(DISTINCT v) AS variables
+      OPTIONAL MATCH (i:Interface) WHERE i.path STARTS WITH path
+      RETURN repo, functions, classes, variables, count(DISTINCT i) AS interfaces
+      ORDER BY functions DESC
+    `);
+
+    // Merge into one table
+    const repoMap = new Map<string, Record<string, unknown>>();
+    for (const r of repos) repoMap.set(r.repo as string, { ...r });
+    for (const r of perRepo) {
+      const existing = repoMap.get(r.repo as string) || {};
+      repoMap.set(r.repo as string, { ...existing, ...r });
+    }
+
+    // Total counts
+    const totals = await graph.runCypher(`
+      MATCH (n)
+      WITH labels(n)[0] AS label, count(n) AS cnt
+      RETURN label, cnt ORDER BY cnt DESC
+    `);
+
+    // Print per-repo table
+    console.log('\ncodes2graph — graph statistics\n');
+
+    // Header
+    const pad = (s: string, n: number) => s.padEnd(n);
+    const rpad = (s: string, n: number) => s.padStart(n);
+    console.log(
+      pad('Repository', 22) +
+      rpad('Files', 8) +
+      rpad('Functions', 11) +
+      rpad('Classes', 9) +
+      rpad('Variables', 11) +
+      rpad('Interfaces', 12)
+    );
+    console.log('-'.repeat(73));
+
+    let totalFiles = 0, totalFn = 0, totalCls = 0, totalVar = 0, totalIface = 0;
+    for (const [name, data] of repoMap) {
+      const files = (data.files as number) || 0;
+      const fn = (data.functions as number) || 0;
+      const cls = (data.classes as number) || 0;
+      const vars = (data.variables as number) || 0;
+      const ifaces = (data.interfaces as number) || 0;
+      totalFiles += files; totalFn += fn; totalCls += cls; totalVar += vars; totalIface += ifaces;
+      console.log(
+        pad(name, 22) +
+        rpad(String(files), 8) +
+        rpad(String(fn), 11) +
+        rpad(String(cls), 9) +
+        rpad(String(vars), 11) +
+        rpad(String(ifaces), 12)
+      );
+    }
+    console.log('-'.repeat(73));
+    console.log(
+      pad('TOTAL', 22) +
+      rpad(String(totalFiles), 8) +
+      rpad(String(totalFn), 11) +
+      rpad(String(totalCls), 9) +
+      rpad(String(totalVar), 11) +
+      rpad(String(totalIface), 12)
+    );
+
+    // Node type summary
+    console.log('\nNode counts:');
+    for (const t of totals) {
+      console.log(`  ${pad(t.label as string, 14)} ${t.cnt}`);
+    }
+
+    console.log(`\nConfig: ${config.configSource}`);
+  } finally {
+    await graph.close();
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -291,6 +397,11 @@ async function main() {
   }
 
   const command = args[0];
+
+  if (command === 'stats') {
+    await stats();
+    return;
+  }
 
   if (!command || !['index', 'watch', 'clean'].includes(command) || args.length < 2) {
     printUsage();
